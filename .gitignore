@@ -7,5 +7,6 @@
 .gocache
 .gotmp
 coverage.out
+/minimal
 dist/
 build/
