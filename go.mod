@@ -1,6 +1,6 @@
 module github.com/septagon-oss/pk-apps
 
-go 1.22
+go 1.26
 
 require (
 	github.com/septagon-oss/pk-core v0.0.0
