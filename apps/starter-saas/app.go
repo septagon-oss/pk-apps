@@ -87,9 +87,12 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 
 	// 2. Health module — has no I/O at construction; supplies a HealthRegistrar
 	//    that downstream modules call into via WithHealthRegistrar.
-	healthMod := healthmod.NewModule(
+	healthMod, err := healthmod.NewModule(
 		healthmod.WithAdminRegistrar(adminReg),
 	)
+	if err != nil {
+		return nil, fmt.Errorf("create health module: %w", err)
+	}
 	healthReg := healthMod.Registrar()
 
 	// 3. Tenant first among data modules — user_management and content can both
