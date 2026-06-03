@@ -12,8 +12,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -132,5 +134,110 @@ func TestDataModulesShareOneConnectionPool(t *testing.T) {
 		if holder.DB() != app.db {
 			t.Errorf("%s store uses a different *sql.DB than the shared app.db (independent pool regression)", name)
 		}
+	}
+}
+
+// TestDefaultDSNCarriesBusyTimeoutAndOpensCleanly guards F3: the shipped
+// default DSN must carry the modernc.org/sqlite-correct busy_timeout pragma so
+// a contended pk.db waits instead of erroring, and it must still open cleanly
+// with the pinned modernc driver. We build the full app against the literal
+// default DSN (pointed at a fresh temp file) so a malformed pragma would
+// surface as an open/ping/pragma error.
+func TestDefaultDSNCarriesBusyTimeoutAndOpensCleanly(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	if !strings.Contains(cfg.Database.DSN, "_pragma=busy_timeout(5000)") {
+		t.Fatalf("default DSN missing busy_timeout pragma: %q", cfg.Database.DSN)
+	}
+
+	// Repoint the default DSN's file at a fresh temp path while preserving its
+	// query string (the pragma we care about) verbatim.
+	dbPath := filepath.Join(t.TempDir(), "pk.db")
+	q := cfg.Database.DSN[strings.IndexByte(cfg.Database.DSN, '?'):]
+	cfg.Database.DSN = "file:" + dbPath + q
+	cfg.HTTP.Addr = ":0"
+
+	app, err := buildApp(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("buildApp() with default busy_timeout DSN error = %v", err)
+	}
+	defer app.Close()
+
+	if err := app.db.PingContext(context.Background()); err != nil {
+		t.Fatalf("shared db ping with busy_timeout DSN: %v", err)
+	}
+}
+
+// TestAuthSharesOneConnectionPool is the auth-module companion to the
+// structural pool guard above. The auth module is wired via WithSQLiteDB(db)
+// rather than WithStore, and its session store does not expose its underlying
+// *sql.DB for pointer comparison. So instead of introspecting it, this test
+// asserts behaviorally that the shared handle reaches auth: it stands up the
+// full app against a fresh temp DB (which seeds the admin user through the
+// user module on the SAME db), then drives an auth login against the seeded
+// credentials over the public HTTP surface. A 201 proves the auth session
+// store wrote a row to — and the login read the seeded user through — the one
+// shared *sql.DB. If auth opened its own pool over the same file, the seeded
+// user/session schema visibility would be driver-dependent and brittle; this
+// is the regression guard for commit a2773b4's WithSQLiteDB wiring.
+func TestAuthSharesOneConnectionPool(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "pk.db")
+	cfg := defaultConfig()
+	cfg.Database.DSN = fmt.Sprintf("file:%s?cache=shared&mode=rwc", dbPath)
+	cfg.HTTP.Addr = ":0"
+
+	app, err := buildApp(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("buildApp() error = %v", err)
+	}
+	defer app.Close()
+
+	mux, err := app.mux()
+	if err != nil {
+		t.Fatalf("mux() error = %v", err)
+	}
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Log in with the seeded credentials. This exercises auth (session store
+	// write) AND the user module read (credential verification) against the one
+	// shared db — proving the shared handle reaches the auth module.
+	loginBody, _ := json.Marshal(map[string]string{
+		"tenant_id": seed.TenantID,
+		"email":     seed.UserEmail,
+		"password":  seed.UserPass,
+	})
+	resp, err := http.Post(srv.URL+"/api/v1/auth/sessions", "application/json", bytes.NewReader(loginBody))
+	if err != nil {
+		t.Fatalf("POST /api/v1/auth/sessions: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("auth login with seeded creds on fresh db: status = %d, want 201\nbody = %s",
+			resp.StatusCode, string(body))
+	}
+	if strings.Contains(string(body), "no such table") {
+		t.Fatalf("auth login reports a missing table — auth did not see the shared schema:\n%s", string(body))
+	}
+
+	// The created session must reference the seeded user, confirming the login
+	// resolved the seeded identity through the shared pool.
+	var sess struct {
+		ID       string `json:"id"`
+		UserID   string `json:"user_id"`
+		TenantID string `json:"tenant_id"`
+	}
+	if err := json.Unmarshal(body, &sess); err != nil {
+		t.Fatalf("decode session: %v\nbody=%s", err, string(body))
+	}
+	if sess.UserID != seed.UserID {
+		t.Errorf("session user_id = %q, want seeded %q", sess.UserID, seed.UserID)
+	}
+	if sess.ID == "" {
+		t.Errorf("auth login returned an empty session id; body=%s", string(body))
 	}
 }

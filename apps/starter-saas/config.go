@@ -63,7 +63,11 @@ func defaultConfig() *Config {
 		},
 		Database: DatabaseConfig{
 			Driver: "sqlite",
-			DSN:    "file:./pk.db?cache=shared&mode=rwc",
+			// _pragma=busy_timeout(5000) makes a busy/locked database wait up to
+			// 5s for the lock instead of immediately returning SQLITE_BUSY — the
+			// modernc.org/sqlite-correct form of the busy_timeout pragma. This
+			// de-risks transient contention on the single shared pk.db file.
+			DSN: "file:./pk.db?_pragma=busy_timeout(5000)&cache=shared&mode=rwc",
 		},
 		Cache: CacheConfig{
 			Provider: "memory",

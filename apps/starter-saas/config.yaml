@@ -10,7 +10,7 @@ http:
 
 database:
   driver: "sqlite"
-  dsn: "file:./pk.db?cache=shared&mode=rwc"
+  dsn: "file:./pk.db?_pragma=busy_timeout(5000)&cache=shared&mode=rwc"
 
 cache:
   provider: "memory"

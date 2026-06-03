@@ -28,24 +28,38 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// main is a thin shell around run so that every fatal exit path still unwinds
+// run's deferred cleanup (notably App.Close, which releases the shared
+// *sql.DB). main only translates a returned error into a non-zero exit code;
+// it must not call log.Fatal/os.Exit while resources are open, because that
+// skips deferred cleanup.
 func main() {
+	if err := run(); err != nil {
+		log.Fatalf("starter-saas: %v", err)
+	}
+}
+
+// run owns the boot sequence and returns an error instead of calling
+// log.Fatal, so that its deferred App.Close runs on every failure path
+// (mux build, listen error) — not just on clean shutdown.
+func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	cfg, err := loadConfig("config.yaml")
 	if err != nil {
-		log.Fatalf("starter-saas: load config: %v", err)
+		return fmt.Errorf("load config: %w", err)
 	}
 
 	app, err := buildApp(ctx, cfg)
 	if err != nil {
-		log.Fatalf("starter-saas: build app: %v", err)
+		return fmt.Errorf("build app: %w", err)
 	}
 	defer app.Close()
 
 	mux, err := app.mux()
 	if err != nil {
-		log.Fatalf("starter-saas: build mux: %v", err)
+		return fmt.Errorf("build mux: %w", err)
 	}
 
 	printBanner(cfg, app)
@@ -71,9 +85,9 @@ func main() {
 		log.Println("starter-saas: shutdown signal received")
 	case err := <-serverErr:
 		if err != nil {
-			log.Fatalf("starter-saas: listen: %v", err)
+			return fmt.Errorf("listen: %w", err)
 		}
-		return
+		return nil
 	}
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.HTTP.ShutdownTimeout)
@@ -83,6 +97,7 @@ func main() {
 	} else {
 		log.Println("starter-saas: server stopped cleanly")
 	}
+	return nil
 }
 
 // printBanner writes the operator-facing startup banner that tells humans

@@ -45,8 +45,27 @@ driver is `modernc.org/sqlite`, pinned via the `pk-modules` go.mod.
 
 ## Adding a module
 
-1. Construct it in `app.go` with `WithSQLiteDSN(cfg.Database.DSN)` and the
-   shared admin/health registrars.
+The app opens **one** shared `*sql.DB` in `buildApp` and every data module is
+built on that single connection pool. Do not give a new module its own
+`WithSQLiteDSN(...)` handle — that would fan out into independent pools over
+one SQLite file and reintroduce `SQLITE_BUSY` / table-visibility problems on a
+fresh database. Reuse the existing `db`:
+
+1. Build the module's store on the shared `db` and pass it via `WithStore`:
+   ```go
+   myStore, err := mysqlite.New(db) // db is the single *sql.DB buildApp opened
+   if err != nil {
+       _ = db.Close()
+       return nil, fmt.Errorf("my store: %w", err)
+   }
+   myMod, err := mymodule.NewModule(
+       mymodule.WithStore(myStore),
+       mymodule.WithAdminRegistrar(adminReg),
+       mymodule.WithHealthRegistrar(healthReg),
+   )
+   ```
+   (Auth is the one exception: it takes the shared handle directly via
+   `WithSQLiteDB(db)`.)
 2. Append `m.Compose` to the `pkmodule.NewBundle` entries and the module ID
    to the `modules` slice.
 3. Call `m.HTTPHandler().RegisterRoutes(mux)` in `App.mux()`.
