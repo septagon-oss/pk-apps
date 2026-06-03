@@ -1,9 +1,19 @@
 // Package main — app.go owns the application assembly graph for starter-saas.
-// buildApp constructs the admin shell, every business module wired against a
-// shared SQLite DSN, the audit emitter forwarded into security-sensitive
+// buildApp opens ONE shared *sql.DB over the configured SQLite file, then
+// constructs the admin shell and every business module against that single
+// connection pool, the audit emitter forwarded into security-sensitive
 // modules, the seed routine that populates the demo tenant + admin user, the
 // pk-core module catalog that proves the composition is valid, and the
 // pk-runtime host that surfaces /live and /ready endpoints.
+//
+// Why one shared *sql.DB: SQLite is a single-writer embedded engine. Giving
+// each module its own WithSQLiteDSN handle would fan out into N independent
+// database/sql pools over one file, which invites SQLITE_BUSY contention and
+// makes startup schema visibility depend on driver-specific shared-cache
+// quirks. Opening one *sql.DB with SetMaxOpenConns(1) serializes all access
+// through a single connection, so the schema each module's store creates at
+// construction is unconditionally visible to every later query — the
+// first-run-on-a-fresh-db guarantee the starter promises.
 //
 // The split between main.go and app.go exists so tests in main_test.go can
 // exercise the same buildApp routine without performing I/O on the network or
@@ -16,6 +26,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"expvar"
 	"fmt"
 	"net/http"
@@ -24,13 +35,19 @@ import (
 
 	"github.com/septagon-oss/pk-modules/pkg/admin"
 	"github.com/septagon-oss/pk-modules/pkg/apikey"
+	apikeysqlite "github.com/septagon-oss/pk-modules/pkg/apikey/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/audit"
+	auditsqlite "github.com/septagon-oss/pk-modules/pkg/audit/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/auth"
 	"github.com/septagon-oss/pk-modules/pkg/content"
+	contentsqlite "github.com/septagon-oss/pk-modules/pkg/content/store/sqlite"
 	healthmod "github.com/septagon-oss/pk-modules/pkg/health"
 	"github.com/septagon-oss/pk-modules/pkg/notification"
+	notificationsqlite "github.com/septagon-oss/pk-modules/pkg/notification/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/tenant"
+	tenantsqlite "github.com/septagon-oss/pk-modules/pkg/tenant/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/user"
+	usersqlite "github.com/septagon-oss/pk-modules/pkg/user/store/sqlite"
 
 	"github.com/septagon-oss/pk-runtime/pkg/host"
 
@@ -57,6 +74,10 @@ type App struct {
 	catalog *pkmodule.Catalog
 	host    *host.Host
 
+	// db is the single shared SQLite connection pool every data module's store
+	// is built on. App owns its lifecycle and closes it in Close().
+	db *sql.DB
+
 	modules       []string
 	adminBasePath string
 	seedEmail     string
@@ -74,6 +95,71 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 	if dsn == "" {
 		return nil, fmt.Errorf("starter-saas: database.dsn is required")
 	}
+	driver := cfg.Database.Driver
+	if driver == "" {
+		driver = "sqlite"
+	}
+
+	// 0. Open ONE shared SQLite connection pool. Every data module's store is
+	//    built from this same *sql.DB so the schema each store creates at
+	//    construction is visible to all later queries and writes serialize
+	//    through a single connection (SQLite is single-writer). SetMaxOpenConns(1)
+	//    eliminates SQLITE_BUSY and cross-pool table-visibility surprises on a
+	//    fresh database. App owns this handle and closes it in Close().
+	db, err := sql.Open(driver, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("starter-saas: open sqlite: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("starter-saas: ping sqlite: %w", err)
+	}
+
+	// Build each module's store on the shared handle. New() runs that store's
+	// CREATE TABLE IF NOT EXISTS, so by the time the modules are constructed
+	// every table already exists on the one connection they all share. If any
+	// store fails we close the shared handle before returning so we never leak
+	// the pool.
+	tenantStore, err := tenantsqlite.New(db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("tenant store: %w", err)
+	}
+	userStore, err := usersqlite.New(db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("user store: %w", err)
+	}
+	auditStore, err := auditsqlite.New(db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("audit store: %w", err)
+	}
+	apiKeyStore, err := apikeysqlite.New(db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("api_key store: %w", err)
+	}
+	contentStore, err := contentsqlite.New(db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("content store: %w", err)
+	}
+	notificationStore, err := notificationsqlite.New(db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("notification store: %w", err)
+	}
+
+	// closeOnErr closes the shared DB if module construction below fails, so a
+	// partial boot does not leak the pool. Cleared once the App takes ownership.
+	closeOnErr := func() { _ = db.Close() }
+	defer func() {
+		if closeOnErr != nil {
+			closeOnErr()
+		}
+	}()
 
 	// 1. Admin shell first — every other module wires AdminRegistrar into it.
 	adminMod, err := admin.NewModule(
@@ -98,7 +184,7 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 	// 3. Tenant first among data modules — user_management and content can both
 	//    consume tenant.TenantService.
 	tenantMod, err := tenant.NewModule(
-		tenant.WithSQLiteDSN(dsn),
+		tenant.WithStore(tenantStore),
 		tenant.WithAdminRegistrar(adminReg),
 		tenant.WithHealthRegistrar(healthReg),
 	)
@@ -108,7 +194,7 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 
 	// 4. User_management — depends on tenant for validation hooks (optional).
 	userMod, err := user.NewModule(
-		user.WithSQLiteDSN(dsn),
+		user.WithStore(userStore),
 		user.WithTenantService(tenantMod.Service()),
 		user.WithAdminRegistrar(adminReg),
 		user.WithHealthRegistrar(healthReg),
@@ -120,7 +206,7 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 	// 5. Audit_management — the AuditEmitter it returns is consumed by auth,
 	//    apikey, content, and notification below.
 	auditMod, err := audit.NewModule(
-		audit.WithSQLiteDSN(dsn),
+		audit.WithStore(auditStore),
 		audit.WithAdminRegistrar(adminReg),
 		audit.WithHealthRegistrar(healthReg),
 	)
@@ -133,7 +219,7 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 
 	// 6. Auth_management — requires user_management's UserBoundaryReader.
 	authMod, err := auth.NewModule(
-		auth.WithSQLiteDSN(dsn),
+		auth.WithSQLiteDB(db),
 		auth.WithUserReader(userMod.Service()),
 		auth.WithAuditEmitter(auditEmitter),
 		auth.WithAdminRegistrar(adminReg),
@@ -145,7 +231,7 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 
 	// 7. API_key_management — optional audit emitter.
 	apiKeyMod, err := apikey.NewModule(
-		apikey.WithSQLiteDSN(dsn),
+		apikey.WithStore(apiKeyStore),
 		apikey.WithAuditEmitter(auditEmitter),
 		apikey.WithAdminRegistrar(adminReg),
 		apikey.WithHealthRegistrar(healthReg),
@@ -156,7 +242,7 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 
 	// 8. Content_management — optional tenant + audit dependencies.
 	contentMod, err := content.NewModule(
-		content.WithSQLiteDSN(dsn),
+		content.WithStore(contentStore),
 		content.WithTenantService(tenantMod.Service()),
 		content.WithAuditEmitter(auditEmitter),
 		content.WithAdminRegistrar(adminReg),
@@ -168,7 +254,7 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 
 	// 9. Notification_management — optional user reader + audit.
 	notificationMod, err := notification.NewModule(
-		notification.WithSQLiteDSN(dsn),
+		notification.WithStore(notificationStore),
 		notification.WithUserReader(userMod.Service()),
 		notification.WithAuditEmitter(auditEmitter),
 		notification.WithAdminRegistrar(adminReg),
@@ -229,6 +315,10 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 		return nil, fmt.Errorf("host: %w", err)
 	}
 
+	// Construction succeeded — the App now owns the shared *sql.DB, so disarm
+	// the defer that would otherwise close it on the error path.
+	closeOnErr = nil
+
 	return &App{
 		admin:         adminMod,
 		tenant:        tenantMod,
@@ -241,6 +331,7 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 		notification:  notificationMod,
 		catalog:       catalog,
 		host:          runtimeHost,
+		db:            db,
 		modules:       modules,
 		adminBasePath: adminMod.BasePath(),
 		seedEmail:     seed.UserEmail,
@@ -248,10 +339,15 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 	}, nil
 }
 
-// Close releases any application-owned resources. Currently the SQLite
-// connection is owned by each module's store and closed when the process
-// exits, so Close is intentionally a no-op held for future use.
-func (a *App) Close() error { return nil }
+// Close releases application-owned resources. The shared SQLite *sql.DB is
+// owned by the App (not by the individual module stores, which all wrap this
+// one handle), so Close is where the connection pool is released.
+func (a *App) Close() error {
+	if a == nil || a.db == nil {
+		return nil
+	}
+	return a.db.Close()
+}
 
 // mux assembles the public HTTP routing surface and returns the http.Handler
 // to serve. Tests use this same routine so the routes under test exactly

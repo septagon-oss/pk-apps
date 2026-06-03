@@ -3,7 +3,7 @@ app_version: "0.0.0"
 environment: "development"
 
 http:
-  addr: ":18090"
+  addr: ":8080"
   read_timeout: "30s"
   write_timeout: "30s"
   shutdown_timeout: "30s"
