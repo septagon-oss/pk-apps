@@ -23,13 +23,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/septagon-oss/pk-core => ../pk-core
-
-replace github.com/septagon-oss/pk-modules => ../pk-modules
-
-replace github.com/septagon-oss/pk-runtime => ../pk-runtime
-
-replace github.com/septagon-oss/pk-shared => ../pk-shared
-
-replace github.com/septagon-oss/pk-testkit => ../pk-testkit
