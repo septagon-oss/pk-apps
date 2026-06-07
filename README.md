@@ -56,7 +56,7 @@ config, adding modules, and tests.
 
 For a deeper walkthrough — what to read first, what to change first,
 and how to swap a provider — see the
-[Starter SaaS tutorial in pk-docs](https://github.com/septagon-oss/pk-docs/blob/main/docs/v0.1.0/starter-saas-tutorial.md).
+[Starter SaaS tutorial in pk-docs](https://github.com/septagon-oss/pk-docs/blob/main/docs/v0.0.0/starter-saas-tutorial.md).
 
 ## Other examples
 
