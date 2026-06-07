@@ -3,11 +3,11 @@ module github.com/septagon-oss/pk-apps
 go 1.26
 
 require (
-	github.com/septagon-oss/pk-core v0.0.0
-	github.com/septagon-oss/pk-modules v0.0.0
-	github.com/septagon-oss/pk-runtime v0.0.0
-	github.com/septagon-oss/pk-shared v0.0.0
-	github.com/septagon-oss/pk-testkit v0.0.0
+	github.com/septagon-oss/pk-core v0.1.0
+	github.com/septagon-oss/pk-modules v0.1.0
+	github.com/septagon-oss/pk-runtime v0.1.0
+	github.com/septagon-oss/pk-shared v0.1.0
+	github.com/septagon-oss/pk-testkit v0.1.0
 	modernc.org/sqlite v1.50.1
 )
 

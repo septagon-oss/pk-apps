@@ -9,8 +9,8 @@ nine composed modules: `tenant_management`, `user_management`,
 ## Quickstart
 
 ```bash
-git clone https://github.com/septagon-oss/septagon-oss-workspace
-cd septagon-oss-workspace/pk-apps/apps/starter-saas
+git clone https://github.com/septagon-oss/pk-apps
+cd pk-apps/apps/starter-saas
 go run .
 ```
 

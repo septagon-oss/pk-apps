@@ -1,5 +1,9 @@
 # pk-apps
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/septagon-oss/pk-apps.svg)](https://pkg.go.dev/github.com/septagon-oss/pk-apps)
+[![CI](https://github.com/septagon-oss/pk-apps/actions/workflows/go.yml/badge.svg)](https://github.com/septagon-oss/pk-apps/actions/workflows/go.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 Minimal OSS app examples for PlatformKit.
 
 This repo proves that the public core and public module pack can compose into a
@@ -10,7 +14,7 @@ modules, client overlays, staging state, or hosted deployment automation.
 
 ## Run me first: `apps/starter-saas`
 
-The canonical "first-run" path for PlatformKit OSS v0.0.0 is the
+The canonical "first-run" path for PlatformKit OSS v0.1.0 is the
 **Starter SaaS** monolith at `apps/starter-saas`. One Go binary, one
 SQLite file, and all nine OSS modules — `tenant_management`,
 `user_management`, `auth_management`, `api_key_management`,
@@ -20,8 +24,8 @@ SQLite file, and all nine OSS modules — `tenant_management`,
 ### Quickstart
 
 ```bash
-git clone https://github.com/septagon-oss/septagon-oss-workspace
-cd septagon-oss-workspace/pk-apps/apps/starter-saas
+git clone https://github.com/septagon-oss/pk-apps
+cd pk-apps/apps/starter-saas
 go run .
 ```
 
@@ -52,7 +56,7 @@ config, adding modules, and tests.
 
 For a deeper walkthrough — what to read first, what to change first,
 and how to swap a provider — see the
-[Starter SaaS tutorial in pk-docs](https://github.com/septagon-oss/pk-docs/blob/main/docs/v0.0.0/starter-saas-tutorial.md).
+[Starter SaaS tutorial in pk-docs](https://github.com/septagon-oss/pk-docs/blob/main/docs/v0.1.0/starter-saas-tutorial.md).
 
 ## Other examples
 
@@ -64,8 +68,16 @@ and how to swap a provider — see the
 ## Verify
 
 ```bash
-make verify
-make staticcheck
-make example
-make runtime-example
+make verify   # go test + go vet + staticcheck + race
 ```
+
+Run the examples:
+
+```bash
+go run ./examples/minimal
+go run ./examples/runtime
+```
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
