@@ -58,7 +58,7 @@ type CacheConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		AppName:     "starter-saas",
-		AppVersion:  "0.0.0",
+		AppVersion:  "0.1.0",
 		Environment: "development",
 		HTTP: HTTPConfig{
 			Addr:            ":8080",

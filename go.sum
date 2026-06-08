@@ -12,16 +12,6 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
 github.com/ncruces/go-strftime v1.0.0/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
-github.com/septagon-oss/pk-core v0.1.0 h1:wxjj5MZnu9rfXYc8X+ncC+4eaHtMksyE1wJJ3UtmNr8=
-github.com/septagon-oss/pk-core v0.1.0/go.mod h1:JGW9owR8hG6vRGF6PTl07ybJ/bLigK5dHNJTM0ts83I=
-github.com/septagon-oss/pk-modules v0.1.0 h1:PI7wKYosjtj9pc0a4QmHhTeTwU4yu/sXrIEd+YbVNM4=
-github.com/septagon-oss/pk-modules v0.1.0/go.mod h1:7j3Hx8e04Dh9yNQozQVjfgpFZCXcDVJT0yq8NcC6bC0=
-github.com/septagon-oss/pk-runtime v0.1.0 h1:1kfYNQIs3vzEEwRvFNjs2I/6eaNN/hKvhTWZpsVpMeY=
-github.com/septagon-oss/pk-runtime v0.1.0/go.mod h1:VKpmVkPFlHE/LSbJh28JAlRx4QI0ez1H0p13zdBDTtA=
-github.com/septagon-oss/pk-shared v0.1.0 h1:P9XuLR3o+UNi1tvSHvdJCBxGoHI6QVjUrHEsjQMIAEg=
-github.com/septagon-oss/pk-shared v0.1.0/go.mod h1:vxrTmX0OgbnHxHQBE+ou/4D7YiMuzv0sVq50eItpzJY=
-github.com/septagon-oss/pk-testkit v0.1.0 h1:/X63DEvoBo7gyTqWUlKrIyc+yiYwLmINyJ3lqw/elAY=
-github.com/septagon-oss/pk-testkit v0.1.0/go.mod h1:P1xE0aginSDlVomnBXm0Be3Y+OkOmkVZUW0KVuz2XQo=
 golang.org/x/crypto v0.51.0 h1:IBPXwPfKxY7cWQZ38ZCIRPI50YLeevDLlLnyC5wRGTI=
 golang.org/x/crypto v0.51.0/go.mod h1:8AdwkbraGNABw2kOX6YFPs3WM22XqI4EXEd8g+x7Oc8=
 golang.org/x/mod v0.33.0 h1:tHFzIWbBifEmbwtGz65eaWyGiGZatSrT9prnU8DbVL8=
