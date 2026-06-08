@@ -1,11 +1,13 @@
-// Package main — main_test.go owns the starter-saas smoke tests. The tests
-// stand the application up against a fresh in-memory SQLite database, drive
-// the mux end-to-end through net/http/httptest, and verify the catalog,
-// seeding, and route surface invariants the README promises.
+// Package starterapp — app_test.go owns the starter smoke tests. The tests
+// stand the application up against a fresh in-memory SQLite database, drive the
+// mux end-to-end through net/http/httptest, and verify the catalog, seeding,
+// and route surface invariants the README promises. They live in-package so
+// they can assert against the unexported construction graph (app.catalog,
+// app.tenant, etc.) that wrappers never need to see.
 //
 // ADR: ADR-0029 (file purpose declaration).
 // Convention: C-14 (every Go file declares its purpose).
-package main
+package starterapp
 
 import (
 	"context"
@@ -17,7 +19,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/septagon-oss/pk-apps/apps/starter-saas/seed"
+	_ "modernc.org/sqlite"
+
+	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
 )
 
 // freshConfig returns a Config that points at a unique file-based SQLite DSN
@@ -27,7 +31,7 @@ import (
 func freshConfig(t *testing.T) *Config {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "pk.db")
-	cfg := defaultConfig()
+	cfg := DefaultConfig()
 	cfg.Database.DSN = fmt.Sprintf("file:%s?cache=shared&mode=rwc", dbPath)
 	cfg.HTTP.Addr = ":0"
 	return cfg
@@ -39,9 +43,9 @@ func TestComposeAllNineModulesIntoCatalog(t *testing.T) {
 	t.Parallel()
 
 	cfg := freshConfig(t)
-	app, err := buildApp(context.Background(), cfg)
+	app, err := BuildApp(context.Background(), cfg)
 	if err != nil {
-		t.Fatalf("buildApp() error = %v", err)
+		t.Fatalf("BuildApp() error = %v", err)
 	}
 	defer app.Close()
 
@@ -71,7 +75,7 @@ func TestComposeAllNineModulesIntoCatalog(t *testing.T) {
 }
 
 // TestSeedCreatesTenantAndUser checks that the first-boot seed populates the
-// demo tenant and admin user, and that running buildApp a second time against
+// demo tenant and admin user, and that running BuildApp a second time against
 // the same DSN does not error out (i.e. seed.Run is idempotent).
 func TestSeedCreatesTenantAndUser(t *testing.T) {
 	t.Parallel()
@@ -79,9 +83,9 @@ func TestSeedCreatesTenantAndUser(t *testing.T) {
 	cfg := freshConfig(t)
 	ctx := context.Background()
 
-	app1, err := buildApp(ctx, cfg)
+	app1, err := BuildApp(ctx, cfg)
 	if err != nil {
-		t.Fatalf("first buildApp() error = %v", err)
+		t.Fatalf("first BuildApp() error = %v", err)
 	}
 	defer app1.Close()
 
@@ -116,29 +120,29 @@ func TestSeedCreatesTenantAndUser(t *testing.T) {
 		t.Errorf("VerifyPassword(%q) error = %v", seed.UserPass, err)
 	}
 
-	// Idempotency: re-running buildApp against the same DSN must not error.
-	app2, err := buildApp(ctx, cfg)
+	// Idempotency: re-running BuildApp against the same DSN must not error.
+	app2, err := BuildApp(ctx, cfg)
 	if err != nil {
-		t.Fatalf("second buildApp() error = %v", err)
+		t.Fatalf("second BuildApp() error = %v", err)
 	}
 	defer app2.Close()
 }
 
 // TestRoutesAreRegistered exercises the HTTP surface end-to-end through the
-// mux that main() serves, verifying the routes Phase C.1 promised exist.
+// mux that wrappers serve, verifying the routes Phase C.1 promised exist.
 func TestRoutesAreRegistered(t *testing.T) {
 	t.Parallel()
 
 	cfg := freshConfig(t)
-	app, err := buildApp(context.Background(), cfg)
+	app, err := BuildApp(context.Background(), cfg)
 	if err != nil {
-		t.Fatalf("buildApp() error = %v", err)
+		t.Fatalf("BuildApp() error = %v", err)
 	}
 	defer app.Close()
 
-	mux, err := app.mux()
+	mux, err := app.Mux()
 	if err != nil {
-		t.Fatalf("mux() error = %v", err)
+		t.Fatalf("Mux() error = %v", err)
 	}
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

@@ -1,28 +1,36 @@
-// Package main — app.go owns the application assembly graph for starter-saas.
-// buildApp opens ONE shared *sql.DB over the configured SQLite file, then
-// constructs the admin shell and every business module against that single
-// connection pool, the audit emitter forwarded into security-sensitive
-// modules, the seed routine that populates the demo tenant + admin user, the
-// pk-core module catalog that proves the composition is valid, and the
-// pk-runtime host that surfaces /live and /ready endpoints.
+// Package starterapp is the importable single source of truth for the
+// PlatformKit OSS "git clone and go run ." starter monolith. It composes all
+// nine OSS PlatformKit modules (tenant, user, audit, health, auth, api_key,
+// content, notification, admin) against a single SQLite database and exposes
+// them through one http.Handler.
+//
+// This package exists so the application's construction graph has exactly ONE
+// home. Both pk-apps's own `apps/starter-saas` binary and the public front-door
+// repo (github.com/septagon-oss/platformkit) are thin ~10-line main() wrappers
+// over BuildApp + App.Mux + App.Serve here. There is no logic duplication
+// between the two runnable entry points: change the graph once, here, and every
+// wrapper inherits it.
+//
+// app.go owns the application assembly graph. BuildApp opens ONE shared *sql.DB
+// over the configured SQLite file, then constructs the admin shell and every
+// business module against that single connection pool, the audit emitter
+// forwarded into security-sensitive modules, the seed routine that populates
+// the demo tenant + admin user, the pk-core module catalog that proves the
+// composition is valid, and the pk-runtime host that surfaces /live and /ready.
 //
 // Why one shared *sql.DB: SQLite is a single-writer embedded engine. Giving
-// each module its own WithSQLiteDSN handle would fan out into N independent
-// database/sql pools over one file, which invites SQLITE_BUSY contention and
-// makes startup schema visibility depend on driver-specific shared-cache
-// quirks. Opening one *sql.DB with SetMaxOpenConns(1) serializes all access
-// through a single connection, so the schema each module's store creates at
-// construction is unconditionally visible to every later query — the
-// first-run-on-a-fresh-db guarantee the starter promises.
-//
-// The split between main.go and app.go exists so tests in main_test.go can
-// exercise the same buildApp routine without performing I/O on the network or
-// signal handlers.
+// each module its own handle would fan out into N independent database/sql
+// pools over one file, which invites SQLITE_BUSY contention and makes startup
+// schema visibility depend on driver-specific shared-cache quirks. Opening one
+// *sql.DB with SetMaxOpenConns(1) serializes all access through a single
+// connection, so the schema each module's store creates at construction is
+// unconditionally visible to every later query — the first-run-on-a-fresh-db
+// guarantee the starter promises.
 //
 // ADR: ADR-0009 (ports-only module communication), ADR-0017 (composition
 // through dependency injection), ADR-0029 (file purpose declaration).
 // Convention: C-14 (every Go file declares its purpose).
-package main
+package starterapp
 
 import (
 	"context"
@@ -51,15 +59,19 @@ import (
 
 	"github.com/septagon-oss/pk-runtime/pkg/host"
 
-	"github.com/septagon-oss/pk-apps/apps/starter-saas/seed"
+	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
 )
 
-// bundleName is the catalog bundle ID for starter-saas. It is exported via
-// constants only so that catalog assertions in main_test.go remain stable.
-const bundleName = "platformkit.starter-saas"
+// BundleName is the catalog bundle ID for the starter monolith. Exported so
+// catalog assertions in tests and front-door wrappers remain stable.
+const BundleName = "platformkit.starter-saas"
 
 // App holds every constructed module plus the composed catalog so callers
-// (main and tests) can introspect the runtime without re-running boot.
+// (binaries and tests) can introspect the runtime without re-running boot.
+//
+// Fields stay unexported to keep the construction graph encapsulated; the
+// accessors below expose exactly what wrappers and tests legitimately need
+// (HTTP handler, lifecycle, banner data, catalog and store introspection).
 type App struct {
 	admin        *admin.Module
 	tenant       *tenant.Module
@@ -84,16 +96,16 @@ type App struct {
 	seedPassword  string
 }
 
-// buildApp constructs every module against the shared SQLite DSN and runs the
+// BuildApp constructs every module against the shared SQLite DSN and runs the
 // first-boot seed. It is the single source of truth for the application's
-// dependency graph and is used by both main() and main_test.go.
-func buildApp(ctx context.Context, cfg *Config) (*App, error) {
+// dependency graph and is used by every runnable wrapper and by tests.
+func BuildApp(ctx context.Context, cfg *Config) (*App, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("starter-saas: nil config")
+		return nil, fmt.Errorf("starterapp: nil config")
 	}
 	dsn := cfg.Database.DSN
 	if dsn == "" {
-		return nil, fmt.Errorf("starter-saas: database.dsn is required")
+		return nil, fmt.Errorf("starterapp: database.dsn is required")
 	}
 	driver := cfg.Database.Driver
 	if driver == "" {
@@ -108,12 +120,12 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 	//    fresh database. App owns this handle and closes it in Close().
 	db, err := sql.Open(driver, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("starter-saas: open sqlite: %w", err)
+		return nil, fmt.Errorf("starterapp: open sqlite: %w", err)
 	}
 	db.SetMaxOpenConns(1)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("starter-saas: ping sqlite: %w", err)
+		return nil, fmt.Errorf("starterapp: ping sqlite: %w", err)
 	}
 
 	// Build each module's store on the shared handle. New() runs that store's
@@ -282,7 +294,7 @@ func buildApp(ctx context.Context, cfg *Config) (*App, error) {
 		content.ModuleID,
 		notification.ModuleID,
 	}
-	bundle := pkmodule.NewBundle(bundleName,
+	bundle := pkmodule.NewBundle(BundleName,
 		[]pkmodule.Entry{
 			{ID: admin.ModuleID, New: adminMod.Compose},
 			{ID: healthmod.ModuleID, New: healthMod.Compose},
@@ -349,12 +361,12 @@ func (a *App) Close() error {
 	return a.db.Close()
 }
 
-// mux assembles the public HTTP routing surface and returns the http.Handler
-// to serve. Tests use this same routine so the routes under test exactly
-// match the binary.
-func (a *App) mux() (http.Handler, error) {
+// Mux assembles the public HTTP routing surface and returns the http.Handler
+// to serve. Every wrapper and test uses this same routine so the routes under
+// test exactly match the binary.
+func (a *App) Mux() (http.Handler, error) {
 	if a == nil {
-		return nil, fmt.Errorf("starter-saas: nil app")
+		return nil, fmt.Errorf("starterapp: nil app")
 	}
 	mux := http.NewServeMux()
 
@@ -416,3 +428,19 @@ func (a *App) indexHandler(w http.ResponseWriter, r *http.Request) {
 </body></html>`,
 		len(a.modules), a.adminBasePath, a.seedEmail, a.seedPassword)
 }
+
+// ModuleIDs returns the human-ordered list of composed module IDs. Wrappers use
+// it for their startup banner; tests use it to assert the composed surface.
+func (a *App) ModuleIDs() []string { return a.modules }
+
+// AdminBasePath is the mount path of the admin shell (e.g. "/admin").
+func (a *App) AdminBasePath() string { return a.adminBasePath }
+
+// SeedEmail and SeedPassword are the advertised first-boot credentials, exposed
+// so a wrapper's banner prints the exact login the seed created.
+func (a *App) SeedEmail() string    { return a.seedEmail }
+func (a *App) SeedPassword() string { return a.seedPassword }
+
+// Catalog exposes the composed pk-core catalog for introspection in tests and
+// wrappers (e.g. listing module IDs). It is read-only by contract.
+func (a *App) Catalog() *pkmodule.Catalog { return a.catalog }

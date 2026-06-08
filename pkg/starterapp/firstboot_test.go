@@ -1,6 +1,6 @@
-// Package main — firstboot_test.go owns the fresh-database first-run
+// Package starterapp — firstboot_test.go owns the fresh-database first-run
 // regression test. It closes the false-confidence gap left by the smoke tests
-// in main_test.go: those build the app and probe routes, but never assert that
+// in app_test.go: those build the app and probe routes, but never assert that
 // the concurrent /healthz aggregation reports every data module healthy on a
 // brand-new pk.db. This test does exactly that — it stands the full mux up
 // against a unique file-based SQLite DSN (what a fresh `git clone && go run .`
@@ -9,7 +9,7 @@
 //
 // ADR: ADR-0029 (file purpose declaration).
 // Convention: C-14 (every Go file declares its purpose).
-package main
+package starterapp
 
 import (
 	"bytes"
@@ -24,7 +24,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/septagon-oss/pk-apps/apps/starter-saas/seed"
+	_ "modernc.org/sqlite"
+
+	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
 )
 
 // TestFreshDatabaseBootIsHealthy proves that on a brand-new SQLite file every
@@ -34,22 +36,22 @@ func TestFreshDatabaseBootIsHealthy(t *testing.T) {
 	t.Parallel()
 
 	dbPath := filepath.Join(t.TempDir(), "pk.db")
-	cfg := defaultConfig()
+	cfg := DefaultConfig()
 	// Mirror the EXACT production DSN shape (cache=shared&mode=rwc) but against
 	// a unique fresh file so this test reproduces a genuine cold start rather
 	// than reusing a stale db.
 	cfg.Database.DSN = fmt.Sprintf("file:%s?cache=shared&mode=rwc", dbPath)
 	cfg.HTTP.Addr = ":0"
 
-	app, err := buildApp(context.Background(), cfg)
+	app, err := BuildApp(context.Background(), cfg)
 	if err != nil {
-		t.Fatalf("buildApp() error = %v", err)
+		t.Fatalf("BuildApp() error = %v", err)
 	}
 	defer app.Close()
 
-	mux, err := app.mux()
+	mux, err := app.Mux()
 	if err != nil {
-		t.Fatalf("mux() error = %v", err)
+		t.Fatalf("Mux() error = %v", err)
 	}
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -104,13 +106,13 @@ func TestDataModulesShareOneConnectionPool(t *testing.T) {
 	t.Parallel()
 
 	dbPath := filepath.Join(t.TempDir(), "pk.db")
-	cfg := defaultConfig()
+	cfg := DefaultConfig()
 	cfg.Database.DSN = fmt.Sprintf("file:%s?cache=shared&mode=rwc", dbPath)
 	cfg.HTTP.Addr = ":0"
 
-	app, err := buildApp(context.Background(), cfg)
+	app, err := BuildApp(context.Background(), cfg)
 	if err != nil {
-		t.Fatalf("buildApp() error = %v", err)
+		t.Fatalf("BuildApp() error = %v", err)
 	}
 	defer app.Close()
 
@@ -146,7 +148,7 @@ func TestDataModulesShareOneConnectionPool(t *testing.T) {
 func TestDefaultDSNCarriesBusyTimeoutAndOpensCleanly(t *testing.T) {
 	t.Parallel()
 
-	cfg := defaultConfig()
+	cfg := DefaultConfig()
 	if !strings.Contains(cfg.Database.DSN, "_pragma=busy_timeout(5000)") {
 		t.Fatalf("default DSN missing busy_timeout pragma: %q", cfg.Database.DSN)
 	}
@@ -158,9 +160,9 @@ func TestDefaultDSNCarriesBusyTimeoutAndOpensCleanly(t *testing.T) {
 	cfg.Database.DSN = "file:" + dbPath + q
 	cfg.HTTP.Addr = ":0"
 
-	app, err := buildApp(context.Background(), cfg)
+	app, err := BuildApp(context.Background(), cfg)
 	if err != nil {
-		t.Fatalf("buildApp() with default busy_timeout DSN error = %v", err)
+		t.Fatalf("BuildApp() with default busy_timeout DSN error = %v", err)
 	}
 	defer app.Close()
 
@@ -185,19 +187,19 @@ func TestAuthSharesOneConnectionPool(t *testing.T) {
 	t.Parallel()
 
 	dbPath := filepath.Join(t.TempDir(), "pk.db")
-	cfg := defaultConfig()
+	cfg := DefaultConfig()
 	cfg.Database.DSN = fmt.Sprintf("file:%s?cache=shared&mode=rwc", dbPath)
 	cfg.HTTP.Addr = ":0"
 
-	app, err := buildApp(context.Background(), cfg)
+	app, err := BuildApp(context.Background(), cfg)
 	if err != nil {
-		t.Fatalf("buildApp() error = %v", err)
+		t.Fatalf("BuildApp() error = %v", err)
 	}
 	defer app.Close()
 
-	mux, err := app.mux()
+	mux, err := app.Mux()
 	if err != nil {
-		t.Fatalf("mux() error = %v", err)
+		t.Fatalf("Mux() error = %v", err)
 	}
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

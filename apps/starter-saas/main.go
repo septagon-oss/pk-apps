@@ -1,12 +1,16 @@
-// Package main wires the runnable starter-saas monolith — the flagship "git
-// clone and go run ." demo that composes all nine OSS PlatformKit modules
-// (tenant, user, audit, health, auth, api_key, content, notification, admin)
-// against a single SQLite database and serves them through one HTTP listener.
+// Package main is pk-apps's thin wrapper around the importable starterapp
+// package — the flagship "git clone and go run ." demo that composes all nine
+// OSS PlatformKit modules (tenant, user, audit, health, auth, api_key, content,
+// notification, admin) against a single SQLite database and serves them through
+// one HTTP listener.
 //
-// main.go owns the boot sequence: parse config, open SQLite, build the admin
-// shell, construct every module with WithSQLiteDSN + WithAdminRegistrar, seed
-// the first tenant + admin user on first boot, compose them through the
-// module catalog, mount HTTP routes, and serve until SIGINT/SIGTERM.
+// All application logic — the module composition graph, the shared *sql.DB, the
+// HTTP mux, the first-boot seed, and the serve loop — lives in
+// github.com/septagon-oss/pk-apps/pkg/starterapp. This binary only loads the
+// local config.yaml, installs the SQLite driver, and hands a signal context to
+// starterapp.Run. The public front-door repo
+// (github.com/septagon-oss/platformkit) is the same ~10-line wrapper over the
+// same package, so there is one and only one source of truth for the app.
 //
 // ADR: ADR-0009 (ports-only module communication), ADR-0017 (composition
 // through dependency injection), ADR-0029 (file purpose declaration).
@@ -15,102 +19,27 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log"
-	"net/http"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	// Register the modernc.org/sqlite driver as "sqlite" so each module's
-	// WithSQLiteDSN call can sql.Open against the same default driver.
+	// store can sql.Open against the same default driver.
 	_ "modernc.org/sqlite"
+
+	"github.com/septagon-oss/pk-apps/pkg/starterapp"
 )
 
-// main is a thin shell around run so that every fatal exit path still unwinds
-// run's deferred cleanup (notably App.Close, which releases the shared
-// *sql.DB). main only translates a returned error into a non-zero exit code;
-// it must not call log.Fatal/os.Exit while resources are open, because that
-// skips deferred cleanup.
 func main() {
-	if err := run(); err != nil {
-		log.Fatalf("starter-saas: %v", err)
-	}
-}
-
-// run owns the boot sequence and returns an error instead of calling
-// log.Fatal, so that its deferred App.Close runs on every failure path
-// (mux build, listen error) — not just on clean shutdown.
-func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	cfg, err := loadConfig("config.yaml")
+	cfg, err := starterapp.LoadConfig("config.yaml")
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+		log.Fatalf("starter-saas: load config: %v", err)
 	}
 
-	app, err := buildApp(ctx, cfg)
-	if err != nil {
-		return fmt.Errorf("build app: %w", err)
+	if err := starterapp.Run(ctx, cfg); err != nil {
+		log.Fatalf("starter-saas: %v", err)
 	}
-	defer app.Close()
-
-	mux, err := app.mux()
-	if err != nil {
-		return fmt.Errorf("build mux: %w", err)
-	}
-
-	printBanner(cfg, app)
-
-	server := &http.Server{
-		Addr:         cfg.HTTP.Addr,
-		Handler:      mux,
-		ReadTimeout:  cfg.HTTP.ReadTimeout,
-		WriteTimeout: cfg.HTTP.WriteTimeout,
-	}
-
-	serverErr := make(chan error, 1)
-	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
-			return
-		}
-		serverErr <- nil
-	}()
-
-	select {
-	case <-ctx.Done():
-		log.Println("starter-saas: shutdown signal received")
-	case err := <-serverErr:
-		if err != nil {
-			return fmt.Errorf("listen: %w", err)
-		}
-		return nil
-	}
-
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.HTTP.ShutdownTimeout)
-	defer cancelShutdown()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("starter-saas: graceful shutdown failed: %v", err)
-	} else {
-		log.Println("starter-saas: server stopped cleanly")
-	}
-	return nil
-}
-
-// printBanner writes the operator-facing startup banner that tells humans
-// exactly how to reach the admin UI and what credentials to type.
-func printBanner(cfg *Config, app *App) {
-	bar := "============================================================"
-	fmt.Println(bar)
-	fmt.Println(" starter-saas — PlatformKit OSS monolith")
-	fmt.Printf("  listening:    http://localhost%s\n", cfg.HTTP.Addr)
-	fmt.Printf("  admin UI:     http://localhost%s%s\n", cfg.HTTP.Addr, app.adminBasePath)
-	fmt.Printf("  health:       http://localhost%s/healthz\n", cfg.HTTP.Addr)
-	fmt.Printf("  metrics:      http://localhost%s/metrics\n", cfg.HTTP.Addr)
-	fmt.Printf("  default login: %s / %s\n", app.seedEmail, app.seedPassword)
-	fmt.Printf("  modules:      %d composed (%s)\n", len(app.modules), strings.Join(app.modules, ", "))
-	fmt.Println(bar)
 }

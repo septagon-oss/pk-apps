@@ -1,0 +1,95 @@
+// Package starterapp — serve.go owns the boot-and-serve loop shared by every
+// runnable wrapper. Main wraps the binary differently (config path, signals),
+// but the serving semantics — build the mux, print the operator banner, listen,
+// and shut down cleanly on SIGINT/SIGTERM — are identical everywhere and live
+// here so there is no duplication between pk-apps's own binary and the
+// front-door repo's main().
+//
+// Run is the one call a ~10-line main() needs: give it a context and a Config
+// and it builds the App, serves until the context is cancelled, and releases
+// the shared *sql.DB on every exit path (including build/listen failure), so a
+// wrapper never has to remember to defer App.Close itself.
+//
+// ADR: ADR-0017 (composition through dependency injection),
+// ADR-0029 (file purpose declaration).
+// Convention: C-14 (every Go file declares its purpose).
+package starterapp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+)
+
+// Run builds the App from cfg and serves it until ctx is cancelled (typically
+// by a SIGINT/SIGTERM signal context the caller owns). It returns an error
+// instead of calling log.Fatal so deferred cleanup — notably App.Close, which
+// releases the shared *sql.DB — runs on every failure path, not just on clean
+// shutdown. A nil return means a clean shutdown.
+func Run(ctx context.Context, cfg *Config) error {
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("build app: %w", err)
+	}
+	defer app.Close()
+
+	mux, err := app.Mux()
+	if err != nil {
+		return fmt.Errorf("build mux: %w", err)
+	}
+
+	printBanner(cfg, app)
+
+	server := &http.Server{
+		Addr:         cfg.HTTP.Addr,
+		Handler:      mux,
+		ReadTimeout:  cfg.HTTP.ReadTimeout,
+		WriteTimeout: cfg.HTTP.WriteTimeout,
+	}
+
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Println("starter-saas: shutdown signal received")
+	case err := <-serverErr:
+		if err != nil {
+			return fmt.Errorf("listen: %w", err)
+		}
+		return nil
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.HTTP.ShutdownTimeout)
+	defer cancelShutdown()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("starter-saas: graceful shutdown failed: %v", err)
+	} else {
+		log.Println("starter-saas: server stopped cleanly")
+	}
+	return nil
+}
+
+// printBanner writes the operator-facing startup banner that tells humans
+// exactly how to reach the admin UI and what credentials to type.
+func printBanner(cfg *Config, app *App) {
+	bar := "============================================================"
+	fmt.Println(bar)
+	fmt.Println(" starter-saas — PlatformKit OSS monolith")
+	fmt.Printf("  listening:    http://localhost%s\n", cfg.HTTP.Addr)
+	fmt.Printf("  admin UI:     http://localhost%s%s\n", cfg.HTTP.Addr, app.adminBasePath)
+	fmt.Printf("  health:       http://localhost%s/healthz\n", cfg.HTTP.Addr)
+	fmt.Printf("  metrics:      http://localhost%s/metrics\n", cfg.HTTP.Addr)
+	fmt.Printf("  default login: %s / %s\n", app.seedEmail, app.seedPassword)
+	fmt.Printf("  modules:      %d composed (%s)\n", len(app.modules), strings.Join(app.modules, ", "))
+	fmt.Println(bar)
+}

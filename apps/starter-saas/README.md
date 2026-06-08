@@ -43,17 +43,27 @@ To swap the database driver, register a different `database/sql` driver in
 `main.go` and update `database.dsn` in `config.yaml`. The OSS reference
 driver is `modernc.org/sqlite`, pinned via the `pk-modules` go.mod.
 
+## Where the code lives
+
+`main.go` here is a thin (~25-line) wrapper: it loads `config.yaml`, registers
+the SQLite driver, and hands a signal context to `starterapp.Run`. All of the
+application logic — the module composition graph, the shared `*sql.DB`, the
+HTTP mux, the first-boot seed, and the serve loop — lives in the importable
+package `github.com/septagon-oss/pk-apps/pkg/starterapp`. The public front-door
+repo (`github.com/septagon-oss/platformkit`) is the same wrapper over the same
+package, so the runnable app has exactly one source of truth.
+
 ## Adding a module
 
-The app opens **one** shared `*sql.DB` in `buildApp` and every data module is
-built on that single connection pool. Do not give a new module its own
-`WithSQLiteDSN(...)` handle — that would fan out into independent pools over
+The app opens **one** shared `*sql.DB` in `starterapp.BuildApp` and every data
+module is built on that single connection pool. Do not give a new module its
+own `WithSQLiteDSN(...)` handle — that would fan out into independent pools over
 one SQLite file and reintroduce `SQLITE_BUSY` / table-visibility problems on a
-fresh database. Reuse the existing `db`:
+fresh database. Edit `pkg/starterapp/app.go` and reuse the existing `db`:
 
 1. Build the module's store on the shared `db` and pass it via `WithStore`:
    ```go
-   myStore, err := mysqlite.New(db) // db is the single *sql.DB buildApp opened
+   myStore, err := mysqlite.New(db) // db is the single *sql.DB BuildApp opened
    if err != nil {
        _ = db.Close()
        return nil, fmt.Errorf("my store: %w", err)
@@ -68,14 +78,15 @@ fresh database. Reuse the existing `db`:
    `WithSQLiteDB(db)`.)
 2. Append `m.Compose` to the `pkmodule.NewBundle` entries and the module ID
    to the `modules` slice.
-3. Call `m.HTTPHandler().RegisterRoutes(mux)` in `App.mux()`.
+3. Call `m.HTTPHandler().RegisterRoutes(mux)` in `(*App).Mux()`.
 
 ## Tests
 
 ```bash
-go test ./...
+go test ./pkg/starterapp/...
 ```
 
-`main_test.go` runs three smoke tests: catalog composition, first-boot
-seeding, and HTTP route registration. They all use a per-test SQLite file
-under `t.TempDir()` and never touch the network.
+The `starterapp` package tests run the smoke suite (catalog composition,
+first-boot seeding, HTTP route registration) plus the fresh-database
+first-run regression and single-shared-pool guards. They all use a per-test
+SQLite file under `t.TempDir()` and never touch the network.

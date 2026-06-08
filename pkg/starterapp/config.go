@@ -1,5 +1,5 @@
-// Package main — config.go owns the small typed configuration surface for the
-// starter-saas monolith plus the YAML loader used by main().
+// Package starterapp — config.go owns the small typed configuration surface for
+// the starter monolith plus the YAML loader used by binary wrappers.
 //
 // We use a hand-written line-oriented parser instead of importing a YAML
 // dependency. The config schema is intentionally narrow: a handful of strings
@@ -7,9 +7,13 @@
 // top-level fields. The parser is tolerant of comments, blank lines, and
 // trailing whitespace and rejects unknown keys to keep typos loud.
 //
+// DefaultConfig is exported so a wrapper can boot the starter with zero config
+// files (the front-door repo relies on this), and LoadConfig is exported so a
+// wrapper that ships a config.yaml can opt into it.
+//
 // ADR: ADR-0029 (file purpose declaration).
 // Convention: C-14 (every Go file declares its purpose).
-package main
+package starterapp
 
 import (
 	"bufio"
@@ -19,7 +23,7 @@ import (
 	"time"
 )
 
-// Config is the parsed contents of config.yaml.
+// Config is the parsed contents of a starter config.yaml.
 type Config struct {
 	AppName     string
 	AppVersion  string
@@ -49,8 +53,9 @@ type CacheConfig struct {
 	Provider string
 }
 
-// defaultConfig returns the runtime defaults used when a key is missing.
-func defaultConfig() *Config {
+// DefaultConfig returns the runtime defaults used when a key is missing — and a
+// complete, bootable config on its own when no config.yaml is present.
+func DefaultConfig() *Config {
 	return &Config{
 		AppName:     "starter-saas",
 		AppVersion:  "0.0.0",
@@ -75,10 +80,11 @@ func defaultConfig() *Config {
 	}
 }
 
-// loadConfig reads config.yaml from path and returns a populated Config. Any
-// key that does not appear in the file is left at the default value.
-func loadConfig(path string) (*Config, error) {
-	cfg := defaultConfig()
+// LoadConfig reads config.yaml from path and returns a populated Config. Any
+// key that does not appear in the file is left at the default value. A missing
+// file is not an error: defaults are returned so the starter still boots.
+func LoadConfig(path string) (*Config, error) {
+	cfg := DefaultConfig()
 
 	f, err := os.Open(path)
 	if err != nil {
