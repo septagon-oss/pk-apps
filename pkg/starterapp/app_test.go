@@ -197,7 +197,8 @@ func TestRoutesAreRegistered(t *testing.T) {
 		{"notifications list", "/api/v1/notifications?user_id=" + seed.UserID},
 	}
 	for _, c := range cruds {
-		requireStatus(c.name, c.path,
+		requireStatus(
+			c.name, c.path,
 			http.StatusOK,
 			http.StatusNoContent,
 			http.StatusBadRequest,

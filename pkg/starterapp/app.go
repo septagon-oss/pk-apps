@@ -294,7 +294,8 @@ func BuildApp(ctx context.Context, cfg *Config) (*App, error) {
 		content.ModuleID,
 		notification.ModuleID,
 	}
-	bundle := pkmodule.NewBundle(BundleName,
+	bundle := pkmodule.NewBundle(
+		BundleName,
 		[]pkmodule.Entry{
 			{ID: admin.ModuleID, New: adminMod.Compose},
 			{ID: healthmod.ModuleID, New: healthMod.Compose},
