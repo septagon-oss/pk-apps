@@ -149,12 +149,12 @@ func stripComment(line string) string {
 // splitKV parses a "key: value" line, stripping the surrounding whitespace
 // from both sides.
 func splitKV(line string) (string, string, bool) {
-	idx := strings.IndexByte(line, ':')
-	if idx < 0 {
+	before, after, ok := strings.Cut(line, ":")
+	if !ok {
 		return "", "", false
 	}
-	key := strings.TrimSpace(line[:idx])
-	value := strings.TrimSpace(line[idx+1:])
+	key := strings.TrimSpace(before)
+	value := strings.TrimSpace(after)
 	value = strings.Trim(value, "\"")
 	if key == "" {
 		return "", "", false

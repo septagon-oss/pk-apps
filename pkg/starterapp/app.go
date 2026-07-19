@@ -233,6 +233,7 @@ func BuildApp(ctx context.Context, cfg *Config) (*App, error) {
 	authMod, err := auth.NewModule(
 		auth.WithSQLiteDB(db),
 		auth.WithUserReader(userMod.Service()),
+		auth.WithLoginPolicy(newLoginAttemptPolicy()),
 		auth.WithAuditEmitter(auditEmitter),
 		auth.WithAdminRegistrar(adminReg),
 		auth.WithHealthRegistrar(healthReg),
