@@ -1,3 +1,7 @@
+// Implements: REQ-010.
+// Per: ADR-0005.
+// Discipline: C-14.
+
 // Package starterapp — config.go owns the small typed configuration surface for
 // the starter monolith plus the YAML loader used by binary wrappers.
 //
