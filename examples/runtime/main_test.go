@@ -1,5 +1,8 @@
 package main
 
+// Validates: REQ-016.
+// Per: ADR-0017.
+// Discipline: C-14.
 // main_test.go validates the runtime example through API flow definitions.
 //
 // ADR: ADR-0029 (file purpose declaration).

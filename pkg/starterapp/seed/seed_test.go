@@ -8,6 +8,9 @@
 // Convention: C-14 (every Go file declares its purpose).
 package seed
 
+// Validates: REQ-TENANT-003.
+// Per: ADR-0017.
+// Discipline: C-14.
 import (
 	"context"
 	"database/sql"

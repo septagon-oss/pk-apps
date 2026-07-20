@@ -1,5 +1,8 @@
 package main
 
+// Validates: REQ-016.
+// Per: ADR-0017.
+// Discipline: C-14.
 // main_test.go validates the minimal OSS app composition example.
 //
 // ADR: ADR-0017 (composition through dependency injection), ADR-0029 (file purpose declaration).

@@ -1,5 +1,8 @@
 package main
 
+// Implements: REQ-016.
+// Per: ADR-0017.
+// Discipline: C-14.
 // main.go demonstrates composing the minimal OSS module bundle into an HTTP
 // runtime host.
 //

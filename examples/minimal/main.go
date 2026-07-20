@@ -1,5 +1,8 @@
 package main
 
+// Implements: REQ-016.
+// Per: ADR-0017.
+// Discipline: C-14.
 // main.go demonstrates composing the minimal OSS PlatformKit module bundle.
 //
 // ADR: ADR-0017 (composition through dependency injection), ADR-0029 (file purpose declaration).

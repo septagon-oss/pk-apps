@@ -17,6 +17,9 @@
 // Convention: C-14 (every Go file declares its purpose).
 package main
 
+// Implements: REQ-016.
+// Per: ADR-0017.
+// Discipline: C-14.
 import (
 	"context"
 	"log"
