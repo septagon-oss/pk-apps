@@ -78,15 +78,53 @@ func TestFreshDatabaseBootIsHealthy(t *testing.T) {
 		t.Fatalf("GET /healthz reports an unhealthy component on fresh db:\n%s", string(body))
 	}
 
-	// The seeded tenants endpoint must be queryable (200) on a fresh db.
-	tResp, err := http.Get(srv.URL + "/api/v1/tenants")
+	// The API now requires authentication. An anonymous read must be rejected
+	// (401), never returning tenant data — this is the closed door on the
+	// v0.1.0 open API.
+	anon, err := http.Get(srv.URL + "/api/v1/tenants")
 	if err != nil {
-		t.Fatalf("GET /api/v1/tenants: %v", err)
+		t.Fatalf("anonymous GET /api/v1/tenants: %v", err)
+	}
+	anonBody, _ := io.ReadAll(anon.Body)
+	anon.Body.Close()
+	if anon.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous GET /api/v1/tenants: status = %d, want 401\nbody = %s",
+			anon.StatusCode, string(anonBody))
+	}
+
+	// Log in with the seeded admin credentials to obtain a session, then use it
+	// as a bearer token — the real authenticated path a client follows.
+	loginBody := fmt.Sprintf(`{"tenant_id":%q,"email":%q,"password":%q}`,
+		seed.TenantID, seed.UserEmail, seed.UserPass)
+	loginResp, err := http.Post(srv.URL+"/api/v1/auth/sessions", "application/json",
+		strings.NewReader(loginBody))
+	if err != nil {
+		t.Fatalf("POST /api/v1/auth/sessions: %v", err)
+	}
+	lBody, _ := io.ReadAll(loginResp.Body)
+	loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusCreated {
+		t.Fatalf("login: status = %d, want 201\nbody = %s", loginResp.StatusCode, string(lBody))
+	}
+	var session struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(lBody, &session); err != nil || session.ID == "" {
+		t.Fatalf("login response has no session id: err=%v body=%s", err, string(lBody))
+	}
+
+	// The seeded tenants endpoint is queryable (200) with the session, and
+	// returns only the caller's own tenant.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/tenants", nil)
+	req.Header.Set("Authorization", "Bearer "+session.ID)
+	tResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("authenticated GET /api/v1/tenants: %v", err)
 	}
 	tBody, _ := io.ReadAll(tResp.Body)
 	tResp.Body.Close()
 	if tResp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /api/v1/tenants on fresh db: status = %d, want 200\nbody = %s",
+		t.Fatalf("authenticated GET /api/v1/tenants: status = %d, want 200\nbody = %s",
 			tResp.StatusCode, string(tBody))
 	}
 	if !strings.Contains(string(tBody), seed.TenantSlug) {

@@ -36,6 +36,7 @@ type Config struct {
 	HTTP     HTTPConfig
 	Database DatabaseConfig
 	Cache    CacheConfig
+	Seed     SeedConfig
 }
 
 // HTTPConfig models the http: block.
@@ -55,6 +56,15 @@ type DatabaseConfig struct {
 // CacheConfig models the cache: block.
 type CacheConfig struct {
 	Provider string
+}
+
+// SeedConfig models the seed: block — the first-boot admin credentials. In a
+// development environment these default to the demo login when unset. Outside
+// development, admin_password is REQUIRED (BuildApp refuses to boot without it)
+// so the starter never ships a hardcoded, re-asserted default password.
+type SeedConfig struct {
+	AdminEmail    string
+	AdminPassword string
 }
 
 // DefaultConfig returns the runtime defaults used when a key is missing — and a
@@ -204,6 +214,15 @@ func applyConfig(cfg *Config, section, key, value string) error {
 			cfg.HTTP.ShutdownTimeout = d
 		default:
 			return fmt.Errorf("unknown http key %q", key)
+		}
+	case "seed":
+		switch key {
+		case "admin_email":
+			cfg.Seed.AdminEmail = value
+		case "admin_password":
+			cfg.Seed.AdminPassword = value
+		default:
+			return fmt.Errorf("unknown seed key %q", key)
 		}
 	case "database":
 		switch key {

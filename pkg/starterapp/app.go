@@ -43,6 +43,7 @@ import (
 	"net/http"
 
 	pkmodule "github.com/septagon-oss/pk-core/pkg/module"
+	"github.com/septagon-oss/pk-core/pkg/security/identity"
 
 	"github.com/septagon-oss/pk-modules/pkg/admin"
 	"github.com/septagon-oss/pk-modules/pkg/apikey"
@@ -281,7 +282,11 @@ func BuildApp(ctx context.Context, cfg *Config) (*App, error) {
 	}
 
 	// Seed the demo tenant + admin user. Safe to call on every boot.
-	if err := seed.Run(ctx, tenantMod.Service(), userMod.Service()); err != nil {
+	seedParams, err := resolveSeedParams(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := seed.Run(ctx, tenantMod.Service(), userMod.Service(), seedParams); err != nil {
 		return nil, fmt.Errorf("seed: %w", err)
 	}
 
@@ -336,7 +341,7 @@ func BuildApp(ctx context.Context, cfg *Config) (*App, error) {
 	// the defer that would otherwise close it on the error path.
 	closeOnErr = nil
 
-	return &App{
+	app := &App{
 		admin:         adminMod,
 		tenant:        tenantMod,
 		user:          userMod,
@@ -351,9 +356,9 @@ func BuildApp(ctx context.Context, cfg *Config) (*App, error) {
 		db:            db,
 		modules:       modules,
 		adminBasePath: adminMod.BasePath(),
-		seedEmail:     seed.UserEmail,
-		seedPassword:  seed.UserPass,
-	}, nil
+	}
+	app.seedEmail, app.seedPassword = seedBannerCredential(cfg, seedParams)
+	return app, nil
 }
 
 // Close releases application-owned resources. The shared SQLite *sql.DB is
@@ -375,10 +380,18 @@ func (a *App) Mux() (http.Handler, error) {
 	}
 	mux := http.NewServeMux()
 
-	// Admin shell at /admin (and /admin/...). The handler owns its own
-	// matcher so we register both the bare prefix and the trailing-slash form.
-	mux.Handle(a.adminBasePath, a.admin.HTTPHandler())
-	mux.Handle(a.adminBasePath+"/", a.admin.HTTPHandler())
+	// Browser login/logout for the admin shell. Registered before (and
+	// outside) the guarded admin handler so an anonymous visitor can reach the
+	// login form.
+	a.registerAdminAuth(mux)
+
+	// Admin shell at /admin (and /admin/...), behind guardAdmin so an
+	// unauthenticated visitor is redirected to the login page instead of
+	// seeing the dashboard. The handler owns its own matcher so we register
+	// both the bare prefix and the trailing-slash form.
+	guardedAdmin := guardAdmin(a.admin.HTTPHandler())
+	mux.Handle(a.adminBasePath, guardedAdmin)
+	mux.Handle(a.adminBasePath+"/", guardedAdmin)
 
 	// Module CRUD APIs. Each module exposes RegisterRoutes(mux) which
 	// publishes its canonical /api/v1/<entity> paths.
@@ -408,7 +421,18 @@ func (a *App) Mux() (http.Handler, error) {
 
 	// Root banner — useful for `curl localhost:8080/` smoke checks.
 	mux.HandleFunc("/", a.indexHandler)
-	return mux, nil
+
+	// Wrap the whole surface: the identity middleware resolves an API-key or
+	// session credential into a Principal on every request (anonymous when
+	// none is presented), then the mutation gate blocks anonymous writes to
+	// /api/v1 as defense in depth. Per-handler tenant scoping reads the
+	// Principal the middleware attaches.
+	resolver := identity.Chain(
+		newAPIKeyResolver(a.apiKey.Service()),
+		newSessionResolver(a.authMod.Service()),
+	)
+	handler := identity.Middleware(resolver)(requireAuthenticatedMutations(mux))
+	return handler, nil
 }
 
 // indexHandler renders a minimal HTML index that points operators at the admin

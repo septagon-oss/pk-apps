@@ -43,31 +43,66 @@ const (
 	UserPass    = "changeme"
 )
 
-// Run ensures the default tenant and admin user exist with the advertised
-// password. It checks each entity by its stable identity and creates or
-// repairs it independently, so a partial prior boot (tenant present but admin
-// user missing or password-less) heals on the next call. It is safe to call on
-// every boot and never produces duplicate rows.
-func Run(ctx context.Context, tenantSvc tenant.TenantService, userSvc user.UserService) error {
+// Params configures the first-boot seed. AdminEmail/AdminPassword set the
+// credential for a NEWLY created admin. RepairPassword controls the one
+// dangerous behavior: whether an EXISTING admin whose password no longer
+// verifies gets reset back to AdminPassword. It must be true only in
+// development — leaving it false in production is what removes the v0.1.0
+// "password re-asserts to changeme on every boot" backdoor.
+type Params struct {
+	AdminEmail     string
+	AdminPassword  string
+	RepairPassword bool
+}
+
+// Result reports what the seed did, so callers can (for example) print a
+// generated credential exactly once when a fresh admin was created.
+type Result struct {
+	TenantCreated bool
+	AdminCreated  bool
+}
+
+// Run ensures the default tenant and admin user exist. It checks each entity by
+// its stable identity and creates it independently, so a partial prior boot
+// (tenant present but admin user missing) heals on the next call. It is safe to
+// call on every boot and never produces duplicate rows. An existing admin's
+// password is left untouched unless params.RepairPassword is set.
+func Run(ctx context.Context, tenantSvc tenant.TenantService, userSvc user.UserService, params Params) (Result, error) {
+	var res Result
 	if tenantSvc == nil {
-		return errors.New("seed: tenant service is required")
+		return res, errors.New("seed: tenant service is required")
 	}
 	if userSvc == nil {
-		return errors.New("seed: user service is required")
+		return res, errors.New("seed: user service is required")
+	}
+	if params.AdminEmail == "" {
+		return res, errors.New("seed: admin email is required")
+	}
+	if params.AdminPassword == "" {
+		return res, errors.New("seed: admin password is required")
 	}
 
-	if err := ensureTenant(ctx, tenantSvc); err != nil {
-		return err
+	created, err := ensureTenant(ctx, tenantSvc)
+	if err != nil {
+		return res, err
 	}
-	return ensureAdminUser(ctx, userSvc)
+	res.TenantCreated = created
+
+	adminCreated, err := ensureAdminUser(ctx, userSvc, params)
+	if err != nil {
+		return res, err
+	}
+	res.AdminCreated = adminCreated
+	return res, nil
 }
 
 // ensureTenant creates the demo tenant if it is not already present, keyed on
-// its stable slug. An existing tenant is left untouched.
-func ensureTenant(ctx context.Context, tenantSvc tenant.TenantService) error {
+// its stable slug. An existing tenant is left untouched. It reports whether it
+// created the tenant.
+func ensureTenant(ctx context.Context, tenantSvc tenant.TenantService) (bool, error) {
 	existing, err := tenantSvc.GetBySlug(ctx, TenantSlug)
 	if err == nil && existing != nil {
-		return nil
+		return false, nil
 	}
 	t := &tenant.Tenant{
 		ID:   TenantID,
@@ -75,42 +110,43 @@ func ensureTenant(ctx context.Context, tenantSvc tenant.TenantService) error {
 		Name: TenantName,
 	}
 	if err := tenantSvc.Create(ctx, t); err != nil {
-		return fmt.Errorf("seed: create tenant: %w", err)
+		return false, fmt.Errorf("seed: create tenant: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // ensureAdminUser guarantees the admin user exists (keyed on its tenant-scoped
-// email) and that the advertised password verifies. It is independent of
-// whether the tenant was just created, so it repairs a user that a prior boot
-// failed to create. The password is re-set unconditionally so a user row that
-// exists without a usable credential is healed.
-func ensureAdminUser(ctx context.Context, userSvc user.UserService) error {
-	existing, err := userSvc.GetByEmail(ctx, TenantID, UserEmail)
+// email). A NEW admin is created with params.AdminPassword. An EXISTING admin
+// is left as-is — its password is only reset when params.RepairPassword is set
+// (development self-heal). This is the fix for the v0.1.0 backdoor where the
+// password was re-asserted unconditionally on every boot, silently reverting an
+// operator's change. It reports whether it created the admin.
+func ensureAdminUser(ctx context.Context, userSvc user.UserService, params Params) (bool, error) {
+	existing, err := userSvc.GetByEmail(ctx, TenantID, params.AdminEmail)
 	if err == nil && existing != nil {
-		// User already present — make sure the advertised credential works even
-		// if a prior boot created the row but never set (or corrupted) it.
-		if vErr := userSvc.VerifyPassword(ctx, existing.ID, UserPass); vErr != nil {
-			if sErr := userSvc.SetPassword(ctx, existing.ID, UserPass); sErr != nil {
-				return fmt.Errorf("seed: repair admin password: %w", sErr)
+		if params.RepairPassword {
+			if vErr := userSvc.VerifyPassword(ctx, TenantID, existing.ID, params.AdminPassword); vErr != nil {
+				if sErr := userSvc.SetPassword(ctx, TenantID, existing.ID, params.AdminPassword); sErr != nil {
+					return false, fmt.Errorf("seed: repair admin password: %w", sErr)
+				}
 			}
 		}
-		return nil
+		return false, nil
 	}
 
 	u := &user.User{
 		ID:          UserID,
 		TenantID:    TenantID,
-		Email:       UserEmail,
+		Email:       params.AdminEmail,
 		Username:    UserName,
 		DisplayName: UserDisplay,
 		Active:      true,
 	}
 	if err := userSvc.Create(ctx, u); err != nil {
-		return fmt.Errorf("seed: create user: %w", err)
+		return false, fmt.Errorf("seed: create user: %w", err)
 	}
-	if err := userSvc.SetPassword(ctx, u.ID, UserPass); err != nil {
-		return fmt.Errorf("seed: set admin password: %w", err)
+	if err := userSvc.SetPassword(ctx, TenantID, u.ID, params.AdminPassword); err != nil {
+		return false, fmt.Errorf("seed: set admin password: %w", err)
 	}
-	return nil
+	return true, nil
 }

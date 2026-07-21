@@ -61,16 +61,66 @@ func newSeedHarness(t *testing.T) (tenant.TenantService, user.UserService) {
 	return tMod.Service(), uMod.Service()
 }
 
+// devSeedParams is the development credential set used across the seed tests:
+// the demo login with password self-repair enabled, mirroring how BuildApp
+// resolves params in a development environment.
+func devSeedParams() Params {
+	return Params{AdminEmail: UserEmail, AdminPassword: UserPass, RepairPassword: true}
+}
+
+// TestProductionParamsDoNotResetPassword is the backdoor regression: with
+// RepairPassword=false (the production default), an admin whose password an
+// operator has changed must NOT be reset to the seed password on a later boot.
+// Before the fix the seed re-asserted the password unconditionally, silently
+// reverting the operator's change.
+func TestProductionParamsDoNotResetPassword(t *testing.T) {
+	ctx := context.Background()
+	tenantSvc, userSvc := newSeedHarness(t)
+
+	prod := Params{AdminEmail: UserEmail, AdminPassword: "initial-strong-pw", RepairPassword: false}
+	if _, err := Run(ctx, tenantSvc, userSvc, prod); err != nil {
+		t.Fatalf("initial Run: %v", err)
+	}
+	u, err := userSvc.GetByEmail(ctx, TenantID, UserEmail)
+	if err != nil {
+		t.Fatalf("GetByEmail: %v", err)
+	}
+	// Operator rotates the password out of band.
+	if err := userSvc.SetPassword(ctx, TenantID, u.ID, "operator-rotated-pw"); err != nil {
+		t.Fatalf("rotate password: %v", err)
+	}
+	// A later production boot must NOT revert it.
+	if _, err := Run(ctx, tenantSvc, userSvc, prod); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if err := userSvc.VerifyPassword(ctx, TenantID, u.ID, "operator-rotated-pw"); err != nil {
+		t.Fatalf("operator's rotated password was reverted by seed (backdoor still present): %v", err)
+	}
+	if err := userSvc.VerifyPassword(ctx, TenantID, u.ID, "initial-strong-pw"); err == nil {
+		t.Fatal("seed re-asserted the original password; backdoor still present")
+	}
+}
+
+// TestRunRequiresPassword confirms Run refuses to seed without an admin
+// password (the composition layer enforces the same in production).
+func TestRunRequiresPassword(t *testing.T) {
+	ctx := context.Background()
+	tenantSvc, userSvc := newSeedHarness(t)
+	if _, err := Run(ctx, tenantSvc, userSvc, Params{AdminEmail: UserEmail}); err == nil {
+		t.Fatal("Run with empty AdminPassword should error")
+	}
+}
+
 // TestRunIsIdempotent proves running Run twice in a row leaves exactly one
 // tenant and one usable admin user (no duplicate-key errors, no duplicates).
 func TestRunIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	tenantSvc, userSvc := newSeedHarness(t)
 
-	if err := Run(ctx, tenantSvc, userSvc); err != nil {
+	if _, err := Run(ctx, tenantSvc, userSvc, devSeedParams()); err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
-	if err := Run(ctx, tenantSvc, userSvc); err != nil {
+	if _, err := Run(ctx, tenantSvc, userSvc, devSeedParams()); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
 
@@ -78,7 +128,7 @@ func TestRunIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByEmail after double Run: %v", err)
 	}
-	if err := userSvc.VerifyPassword(ctx, u.ID, UserPass); err != nil {
+	if err := userSvc.VerifyPassword(ctx, TenantID, u.ID, UserPass); err != nil {
 		t.Fatalf("advertised login does not work after double Run: %v", err)
 	}
 }
@@ -94,7 +144,7 @@ func TestRunRepairsStrandedLogin(t *testing.T) {
 	tenantSvc, userSvc := newSeedHarness(t)
 
 	// (a) Run seed — full happy path creates tenant + admin user.
-	if err := Run(ctx, tenantSvc, userSvc); err != nil {
+	if _, err := Run(ctx, tenantSvc, userSvc, devSeedParams()); err != nil {
 		t.Fatalf("initial Run: %v", err)
 	}
 
@@ -104,7 +154,7 @@ func TestRunRepairsStrandedLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetByEmail before delete: %v", err)
 	}
-	if err := userSvc.Delete(ctx, u.ID); err != nil {
+	if err := userSvc.Delete(ctx, TenantID, u.ID); err != nil {
 		t.Fatalf("delete admin user: %v", err)
 	}
 	if _, err := userSvc.GetByEmail(ctx, TenantID, UserEmail); err == nil {
@@ -113,7 +163,7 @@ func TestRunRepairsStrandedLogin(t *testing.T) {
 
 	// (c) Run seed again. The tenant already exists, so a tenant-only
 	//     idempotency check would skip repair.
-	if err := Run(ctx, tenantSvc, userSvc); err != nil {
+	if _, err := Run(ctx, tenantSvc, userSvc, devSeedParams()); err != nil {
 		t.Fatalf("repair Run: %v", err)
 	}
 
@@ -122,7 +172,7 @@ func TestRunRepairsStrandedLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("admin user was not recreated by repair Run: %v", err)
 	}
-	if err := userSvc.VerifyPassword(ctx, repaired.ID, UserPass); err != nil {
+	if err := userSvc.VerifyPassword(ctx, TenantID, repaired.ID, UserPass); err != nil {
 		t.Fatalf("advertised login does not work after repair Run: %v", err)
 	}
 }

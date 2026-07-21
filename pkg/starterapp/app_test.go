@@ -119,7 +119,7 @@ func TestSeedCreatesTenantAndUser(t *testing.T) {
 	if !adminUser.Active {
 		t.Errorf("seed user Active = false, want true")
 	}
-	if err := app1.user.Service().VerifyPassword(ctx, seed.UserID, seed.UserPass); err != nil {
+	if err := app1.user.Service().VerifyPassword(ctx, seed.TenantID, seed.UserID, seed.UserPass); err != nil {
 		t.Errorf("VerifyPassword(%q) error = %v", seed.UserPass, err)
 	}
 
