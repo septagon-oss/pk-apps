@@ -31,6 +31,7 @@ type loginAttemptKey struct {
 
 type loginAttemptState struct {
 	failures      int
+	pending       int
 	windowStarted time.Time
 	lockedUntil   time.Time
 }
@@ -79,13 +80,46 @@ func (p *loginAttemptPolicy) AllowLogin(ctx context.Context, tenantID, identifie
 		}
 		if !now.Before(state.windowStarted.Add(p.failureWindow)) {
 			delete(p.attempts, key)
+			state = loginAttemptState{}
 			exists = false
 		}
 	}
 
-	if !exists && now.Before(p.saturatedUntil) {
-		return errLoginPolicySaturated
+	// Count in-flight attempts (pending) alongside recorded failures so a
+	// concurrent burst cannot slip more than failureLimit attempts past the
+	// gate before any of them has recorded its failure. Once the combined
+	// count reaches the limit we lock immediately instead of admitting the
+	// attempt — closing the check-then-record race.
+	if state.failures+state.pending >= p.failureLimit {
+		if !now.Before(state.lockedUntil) {
+			state.lockedUntil = now.Add(p.lockout)
+		}
+		if !exists {
+			state.windowStarted = now
+		}
+		p.attempts[key] = state
+		return errLoginTemporarilyLocked
 	}
+
+	if !exists {
+		if now.Before(p.saturatedUntil) {
+			return errLoginPolicySaturated
+		}
+		if len(p.attempts) >= p.trackedLimit {
+			p.pruneExpired(now)
+			if len(p.attempts) >= p.trackedLimit {
+				p.saturatedUntil = now.Add(p.failureWindow)
+				return errLoginPolicySaturated
+			}
+		}
+		state.windowStarted = now
+	}
+
+	// Reserve a slot for this in-flight attempt. RecordFailure or
+	// RecordSuccess releases it; the auth service guarantees exactly one of
+	// those runs for every admitted attempt.
+	state.pending++
+	p.attempts[key] = state
 	return nil
 }
 
@@ -115,6 +149,9 @@ func (p *loginAttemptPolicy) RecordFailure(_ context.Context, tenantID, identifi
 	if !exists {
 		state.windowStarted = now
 	}
+	if state.pending > 0 {
+		state.pending--
+	}
 	state.failures++
 	if state.failures >= p.failureLimit {
 		state.lockedUntil = now.Add(p.lockout)
@@ -123,8 +160,25 @@ func (p *loginAttemptPolicy) RecordFailure(_ context.Context, tenantID, identifi
 }
 
 func (p *loginAttemptPolicy) RecordSuccess(_ context.Context, tenantID, identifier string) {
+	key := normalizedLoginAttemptKey(tenantID, identifier)
 	p.mu.Lock()
-	delete(p.attempts, normalizedLoginAttemptKey(tenantID, identifier))
+	if state, ok := p.attempts[key]; ok {
+		if state.pending > 0 {
+			state.pending--
+		}
+		if state.pending <= 0 {
+			// No other attempt is in flight for this identifier: drop the entry
+			// so a successful login fully clears its throttle footprint.
+			delete(p.attempts, key)
+		} else {
+			// Correct credentials clear the recorded failures and any lock, but
+			// keep the entry alive for the other in-flight attempts that still
+			// hold a pending reservation.
+			state.failures = 0
+			state.lockedUntil = time.Time{}
+			p.attempts[key] = state
+		}
+	}
 	if len(p.attempts) < p.trackedLimit {
 		p.saturatedUntil = time.Time{}
 	}

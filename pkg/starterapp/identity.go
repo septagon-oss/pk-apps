@@ -120,6 +120,25 @@ func isLoginRequest(r *http.Request) bool {
 	return strings.TrimSuffix(r.URL.Path, "/") == "/api/v1/auth/sessions"
 }
 
+// maxRequestBodyBytes caps every inbound request body. JSON API requests are
+// small; 1 MiB is generous and turns an unbounded-body memory-exhaustion DoS
+// into a 413.
+const maxRequestBodyBytes int64 = 1 << 20
+
+// limitRequestBody caps r.Body via http.MaxBytesReader so a handler that reads
+// past the limit gets an error and the client a 413, instead of the process
+// buffering an arbitrarily large body. Applied once, outermost, so it covers
+// every route — including the pre-auth login endpoint — and any route added
+// later.
+func limitRequestBody(max int64, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, max)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // requireAuthenticated wraps a handler so only an authenticated (non-anonymous)
 // principal reaches it. Used for operator surfaces like /metrics that would
 // otherwise leak process internals (expvar exposes cmdline and memstats) to any

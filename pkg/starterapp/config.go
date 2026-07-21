@@ -111,7 +111,14 @@ func LoadConfig(path string) (*Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Missing config is acceptable for the demo — defaults will boot.
+			// A caller invoking LoadConfig is declaring "I expect configuration."
+			// A MISSING file is therefore a deployment signal, not the demo, and
+			// must fail closed: production requires seed.admin_password, so a
+			// misconfigured deployment (wrong CWD, unmounted volume, typo'd path)
+			// refuses to boot rather than silently running the re-asserted demo
+			// credential. The zero-config demo path is DefaultConfig() (used by
+			// the front door), which is development on purpose.
+			cfg.Environment = "production"
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("open %s: %w", path, err)

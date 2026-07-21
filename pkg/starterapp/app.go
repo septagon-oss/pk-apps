@@ -43,6 +43,7 @@ import (
 	"net/http"
 
 	pkmodule "github.com/septagon-oss/pk-core/pkg/module"
+	"github.com/septagon-oss/pk-core/pkg/security/cookies"
 	"github.com/septagon-oss/pk-core/pkg/security/identity"
 
 	"github.com/septagon-oss/pk-modules/pkg/admin"
@@ -281,6 +282,15 @@ func BuildApp(ctx context.Context, cfg *Config) (*App, error) {
 		return nil, fmt.Errorf("notification module: %w", err)
 	}
 
+	// Outside development, force Secure on all cookies. A production deployment
+	// typically sits behind a TLS-terminating proxy that may not forward the
+	// scheme, in which case the session cookie would otherwise ship without
+	// Secure and be transmittable in cleartext. Development stays scheme-derived
+	// so the local http demo works.
+	if cfg.Environment != "development" {
+		cookies.Configure(cookies.Settings{ForceSecure: true})
+	}
+
 	// Seed the demo tenant + admin user. Safe to call on every boot.
 	seedParams, err := resolveSeedParams(cfg)
 	if err != nil {
@@ -432,7 +442,12 @@ func (a *App) Mux() (http.Handler, error) {
 		newAPIKeyResolver(a.apiKey.Service()),
 		newSessionResolver(a.authMod.Service()),
 	)
-	handler := identity.Middleware(resolver)(requireAuthenticatedMutations(mux))
+	// limitRequestBody is the OUTERMOST wrapper so it caps EVERY request body —
+	// including the pre-auth login POST — before any handler reads it. Without
+	// it, json.Decode buffers an unbounded body (an anonymous multi-GB login
+	// body is a memory-exhaustion DoS).
+	handler := limitRequestBody(maxRequestBodyBytes,
+		identity.Middleware(resolver)(requireAuthenticatedMutations(mux)))
 	return handler, nil
 }
 

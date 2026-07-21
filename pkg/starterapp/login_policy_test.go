@@ -7,6 +7,8 @@ package starterapp
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -47,6 +49,40 @@ func TestLoginAttemptPolicySuccessClearsFailures(t *testing.T) {
 	policy.RecordFailure(context.Background(), "tenant", "user@example.test")
 	if err := policy.AllowLogin(context.Background(), "tenant", "user@example.test"); err != nil {
 		t.Fatalf("AllowLogin after successful reset: %v", err)
+	}
+}
+
+// TestLoginAttemptPolicyBurstIsBounded is the v0.2.2 regression for the
+// check-then-record throttle race: a concurrent burst of wrong-password
+// attempts against one identifier must not slip more than failureLimit past the
+// gate before lockout engages. The pending-reservation counter closes the
+// window where many goroutines all read a sub-threshold count before any of
+// them records its failure.
+func TestLoginAttemptPolicyBurstIsBounded(t *testing.T) {
+	t.Parallel()
+
+	policy := newLoginAttemptPolicy()
+	const attackers = 64
+	var admitted int64
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for range attackers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := policy.AllowLogin(context.Background(), "tenant", "victim@example.test"); err == nil {
+				atomic.AddInt64(&admitted, 1)
+				// Every admitted attempt is a wrong password in this scenario.
+				policy.RecordFailure(context.Background(), "tenant", "victim@example.test")
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := atomic.LoadInt64(&admitted); got > int64(starterLoginFailureLimit) {
+		t.Fatalf("burst admitted %d attempts, want <= failureLimit=%d — throttle race is open", got, starterLoginFailureLimit)
 	}
 }
 

@@ -90,8 +90,8 @@ func TestLoadConfigOmittedEnvironmentFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig(missing): %v", err)
 	}
-	if cfg2.Environment != "development" {
-		t.Fatalf("missing config (demo path) should stay development, got %q", cfg2.Environment)
+	if cfg2.Environment != "production" {
+		t.Fatalf("missing config must fail closed to production, got %q", cfg2.Environment)
 	}
 
 	// An explicit environment in the file wins.
@@ -196,6 +196,43 @@ func TestSpoofedBodyTenantIsIgnored(t *testing.T) {
 	// Nothing should exist in the spoofed tenant.
 	if got, err := app.contentMod.Service().Get(ctx, "tenant_spoofed", created.ID); err == nil {
 		t.Fatalf("content leaked into spoofed tenant: %+v", got)
+	}
+}
+
+// TestRequestBodyIsCapped is the v0.2.2 regression for the unbounded-body
+// memory-exhaustion DoS: a request body larger than maxRequestBodyBytes must be
+// rejected rather than fully buffered and processed. The payload is valid JSON
+// that would create content if it fit under the cap, so a non-2xx status proves
+// the cap — not a parse error — did the rejecting.
+func TestRequestBodyIsCapped(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "pk.db")
+	cfg := DefaultConfig()
+	cfg.Database.DSN = fmt.Sprintf("file:%s?cache=shared&mode=rwc", dbPath)
+	cfg.HTTP.Addr = ":0"
+
+	ctx := context.Background()
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	defer app.Close()
+	srv := httptest.NewServer(mustMux(t, app))
+	defer srv.Close()
+
+	sid := loginSeeded(t, srv)
+	huge := strings.Repeat("a", int(maxRequestBodyBytes)+(1<<20)) // ~2 MiB, over the 1 MiB cap
+	body := fmt.Sprintf(`{"kind":"post","slug":"big","title":"big","body":%q}`, huge)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/content", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+sid)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("oversized create: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode < 400 {
+		t.Fatalf("oversized body accepted with status %d — request body is not capped", resp.StatusCode)
 	}
 }
 
