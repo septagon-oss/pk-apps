@@ -60,7 +60,7 @@ config, adding modules, and tests.
 
 For a deeper walkthrough — what to read first, what to change first,
 and how to swap a provider — see the
-[quickstart in pk-docs](https://github.com/septagon-oss/pk-docs/blob/main/docs/v0.1.0/quickstart.md).
+[quickstart in pk-docs](https://github.com/septagon-oss/pk-docs/blob/main/docs/v0.2.0/quickstart.md).
 
 ## Other examples
 
