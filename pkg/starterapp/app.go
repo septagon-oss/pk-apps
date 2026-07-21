@@ -406,10 +406,11 @@ func (a *App) Mux() (http.Handler, error) {
 	// Health endpoint at /healthz (the module's APIPath constant).
 	a.health.HTTPHandler().RegisterRoutes(mux)
 
-	// /metrics — expose the standard library expvar registry. This is the
-	// canonical Go runtime metrics surface; observability vendors can scrape
-	// it directly. expvar.Handler() registers its own JSON encoder.
-	mux.Handle("/metrics", expvar.Handler())
+	// /metrics — the standard library expvar registry, behind authentication.
+	// expvar exposes cmdline and memstats, so an unauthenticated scrape is an
+	// information disclosure; a scraper authenticates with an API key like any
+	// other client. (/healthz, /live, /ready stay open for liveness probing.)
+	mux.Handle("/metrics", requireAuthenticated(expvar.Handler()))
 
 	// /live and /ready are owned by pk-runtime/host. Forward only those two
 	// paths to the host so the rest of our mux stays in control.

@@ -95,4 +95,25 @@ func printBanner(cfg *Config, app *App) {
 	fmt.Printf("  default login: %s / %s\n", app.seedEmail, app.seedPassword)
 	fmt.Printf("  modules:      %d composed (%s)\n", len(app.modules), strings.Join(app.modules, ", "))
 	fmt.Println(bar)
+	printDevelopmentWarning(cfg)
+}
+
+// printDevelopmentWarning emits a loud, unmissable notice when the app runs in
+// the development environment. Development mode seeds a well-known admin
+// password and RE-ASSERTS it on every boot (seed.Params.RepairPassword) — the
+// exact v0.1.0 behavior that is dangerous if exposed. Making it noisy removes
+// the "silent" failure mode: an operator who deploys without declaring
+// environment=production sees this on every start.
+func printDevelopmentWarning(cfg *Config) {
+	if cfg.Environment != "development" {
+		return
+	}
+	fmt.Println()
+	fmt.Println("  ⚠  DEVELOPMENT MODE — NOT SAFE TO EXPOSE")
+	fmt.Println("     • the admin password is a built-in demo default and is")
+	fmt.Println("       RE-ASSERTED on every boot (a changed password reverts).")
+	fmt.Println("     • a demo tenant + admin user are auto-seeded.")
+	fmt.Println("     For any real or network-exposed deployment set")
+	fmt.Println("     environment=production and seed.admin_password in config.yaml.")
+	fmt.Println()
 }

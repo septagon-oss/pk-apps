@@ -97,6 +97,14 @@ func DefaultConfig() *Config {
 // LoadConfig reads config.yaml from path and returns a populated Config. Any
 // key that does not appear in the file is left at the default value. A missing
 // file is not an error: defaults are returned so the starter still boots.
+//
+// Security note: when a config file IS present, an omitted `environment:` key
+// defaults to "production", NOT to the development default. Writing a config
+// file signals a real deployment, and the development default silently enables
+// a re-asserted demo password — so an operator who provides a config but
+// forgets to declare the environment fails closed (production requires
+// seed.admin_password) rather than silently running the demo credential. The
+// zero-config demo path (DefaultConfig with no file) stays development.
 func LoadConfig(path string) (*Config, error) {
 	cfg := DefaultConfig()
 
@@ -109,6 +117,11 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
+
+	// A present config file is a deployment signal: fail closed on environment
+	// unless the file explicitly declares it. The file's `environment:` key (if
+	// any) overrides this during parsing below.
+	cfg.Environment = "production"
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 16*1024), 1<<20)

@@ -59,12 +59,17 @@ var adminLoginTemplate = template.Must(template.New("admin-login").Parse(`<!doct
 </body>
 </html>`))
 
-// guardAdmin requires an authenticated principal to view the admin surface.
-// Anonymous callers are redirected to the login page. This is what closes the
-// v0.1.0 open-admin dashboard.
+// guardAdmin requires an INTERACTIVE (session) principal to view the admin
+// surface. Anonymous callers and non-interactive credentials (API keys) are
+// redirected to the login page. Gating on the session auth method — not merely
+// "not anonymous" — keeps machine credentials out of the human console; a
+// programmatic client should use the tenant-scoped /api/v1 surface with its API
+// key, not the admin UI. (OSS has only a coarse admin notion; per-role gating
+// of the console is a downstream authorization concern.) This closes both the
+// v0.1.0 open-admin dashboard and the v0.2.0 any-credential-is-admin gap.
 func guardAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if identity.PrincipalFromContext(r.Context()).IsAnonymous() {
+		if identity.PrincipalFromContext(r.Context()).AuthMethod != "session" {
 			http.Redirect(w, r, adminLoginPath, http.StatusSeeOther)
 			return
 		}

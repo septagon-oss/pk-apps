@@ -108,16 +108,42 @@ func isMutation(method string) bool {
 	return false
 }
 
+// isLoginRequest reports whether r is the one endpoint that MUST accept an
+// anonymous mutation: POST to the auth sessions collection (login). It is an
+// exact method+path match — NOT a prefix over the whole /api/v1/auth/ subtree —
+// so anonymous logout (DELETE /api/v1/auth/sessions/{id}) and any other auth
+// mutation are NOT exempt and fail closed at the gate.
+func isLoginRequest(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	return strings.TrimSuffix(r.URL.Path, "/") == "/api/v1/auth/sessions"
+}
+
+// requireAuthenticated wraps a handler so only an authenticated (non-anonymous)
+// principal reaches it. Used for operator surfaces like /metrics that would
+// otherwise leak process internals (expvar exposes cmdline and memstats) to any
+// unauthenticated caller.
+func requireAuthenticated(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if identity.PrincipalFromContext(r.Context()).IsAnonymous() {
+			http.Error(w, "unauthorized: authentication required", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // requireAuthenticatedMutations blocks anonymous state-changing requests to the
 // /api/v1 surface as defense in depth: even if a handler forgets to scope by
-// tenant, an unauthenticated mutation fails closed here with 401. The login
-// endpoint is exempt because a caller cannot hold a session before it
+// tenant, an unauthenticated mutation fails closed here with 401. Only the
+// login endpoint is exempt, because a caller cannot hold a session before it
 // authenticates.
 func requireAuthenticatedMutations(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isMutation(r.Method) &&
 			strings.HasPrefix(r.URL.Path, "/api/v1/") &&
-			!strings.HasPrefix(r.URL.Path, "/api/v1/auth/") &&
+			!isLoginRequest(r) &&
 			identity.PrincipalFromContext(r.Context()).IsAnonymous() {
 			http.Error(w, "unauthorized: authentication required", http.StatusUnauthorized)
 			return

@@ -172,14 +172,17 @@ func TestRoutesAreRegistered(t *testing.T) {
 		}
 	}
 
-	// /admin renders the dashboard.
+	// /admin is behind guardAdmin: an anonymous request is redirected to the
+	// login page (which the default client follows to a 200). The dedicated
+	// guardAdmin test asserts the redirect itself.
 	requireStatus("admin home", "/admin", http.StatusOK)
 
 	// /healthz is served by health_management.
 	requireStatus("healthz", "/healthz", http.StatusOK)
 
-	// /metrics is served by expvar.
-	requireStatus("metrics", "/metrics", http.StatusOK)
+	// /metrics is served by expvar but is now behind authentication, so an
+	// anonymous scrape is rejected (401) rather than leaking process internals.
+	requireStatus("metrics", "/metrics", http.StatusUnauthorized)
 
 	// /live and /ready are owned by pk-runtime/host.
 	requireStatus("live", "/live", http.StatusNoContent)
