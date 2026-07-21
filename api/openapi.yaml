@@ -1,0 +1,752 @@
+# OpenAPI description of the PlatformKit OSS starter API (the nine-module
+# monolith served by pk-apps/pkg/starterapp and the platformkit front door).
+#
+# This file is hand-authored against the handler code in pk-modules/pkg and is
+# bound to the running app by pkg/starterapp/openapi_conformance_test.go: every
+# path+method listed here is exercised against a booted app in that test, so
+# the spec cannot silently drift from the implementation.
+openapi: 3.0.3
+info:
+  title: PlatformKit OSS API
+  version: 0.2.2
+  description: |
+    The HTTP API of the PlatformKit OSS starter (nine modules, multi-tenant,
+    SQLite-backed).
+
+    **Authentication.** Every `/api/v1/*` endpoint requires authentication
+    except `POST /api/v1/auth/sessions` (login). Authenticate with
+    `Authorization: Bearer <token>` where the token is either a session ID
+    returned by login or an API key (`pk_...`). A session cookie
+    (`pk_session`, set by the browser login page) works equally.
+
+    **Tenancy.** The caller's tenant is derived from the authenticated
+    principal, never from the request body — body-supplied `tenant_id` /
+    `user_id` / `author_id` fields are ignored on writes. Every by-id
+    operation is tenant-scoped: an ID belonging to another tenant responds
+    `404`.
+
+    **Errors.** Success responses are JSON. Error responses are plain text
+    (`text/plain`) with the status code carrying the semantics: `400` invalid
+    input, `401` missing/invalid credentials, `404` not found (including
+    cross-tenant IDs), `405` method not allowed, `409` uniqueness conflict,
+    `413` request body over 1 MiB, `429` login throttled.
+servers:
+  - url: http://localhost:8080
+tags:
+  - name: auth
+  - name: tenants
+  - name: users
+  - name: api-keys
+  - name: audit
+  - name: content
+  - name: notifications
+  - name: health
+
+security:
+  - bearerAuth: []
+  - cookieAuth: []
+
+paths:
+  /api/v1/auth/sessions:
+    post:
+      tags: [auth]
+      summary: Log in and create a session
+      description: |
+        The only unauthenticated API endpoint. `tenant_id` and `password` are
+        required plus exactly one of `email` or `username`. Repeated failures
+        for the same identifier trip a lockout (`429`).
+      security: []
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '201':
+          description: Session created. The `id` is your bearer token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: User is inactive, content: { text/plain: { schema: { type: string } } } }
+        '429': { description: Login temporarily locked after repeated failures, content: { text/plain: { schema: { type: string } } } }
+
+  /api/v1/auth/sessions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    get:
+      tags: [auth]
+      summary: Read a session's metadata (owner only)
+      description: |
+        Only the session's owner may read it; anonymous callers and callers
+        asking about someone else's session receive indistinguishable
+        responses. An expired or revoked session responds `401`.
+      operationId: getSession
+      responses:
+        '200':
+          description: The caller's own session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [auth]
+      summary: Log out (revoke a session, owner only)
+      description: Idempotent for already-dead sessions the caller owns.
+      operationId: logout
+      responses:
+        '204': { description: Session revoked. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/tenants:
+    get:
+      tags: [tenants]
+      summary: List tenants visible to the caller
+      description: Returns only the caller's own tenant.
+      operationId: listTenants
+      responses:
+        '200':
+          description: Tenant list.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Tenant' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [tenants]
+      summary: Create a tenant (not available in OSS)
+      description: |
+        Tenant provisioning is a platform/operator operation, not something a
+        tenant-scoped caller may do — the OSS ships no platform-admin role,
+        so this endpoint always responds `403`. Tenants are seeded in-process
+        or created out of band; a downstream distribution with a platform
+        authz tier can re-open this route behind that check.
+      operationId: createTenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TenantInput' }
+      responses:
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Tenant provisioning is a platform operation., content: { text/plain: { schema: { type: string } } } }
+
+  /api/v1/tenants/{id}:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    get:
+      tags: [tenants]
+      summary: Get a tenant by ID (caller's own only)
+      operationId: getTenant
+      responses:
+        '200':
+          description: The tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tenant' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [tenants]
+      summary: Update the caller's own tenant
+      description: Any other tenant ID — existing or not — responds `404`.
+      operationId: updateTenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TenantInput' }
+      responses:
+        '200':
+          description: Updated tenant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tenant' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [tenants]
+      summary: Delete a tenant (caller's own only)
+      operationId: deleteTenant
+      responses:
+        '204': { description: Tenant deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/users:
+    get:
+      tags: [users]
+      summary: List users in the caller's tenant
+      operationId: listUsers
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: User list (page size capped at 1000).
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/User' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [users]
+      summary: Create a user in the caller's tenant
+      description: A body-supplied `tenant_id` is ignored; the caller's tenant is authoritative.
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserInput' }
+      responses:
+        '201':
+          description: User created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/users/{id}:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    get:
+      tags: [users]
+      summary: Get a user by ID (caller's tenant only)
+      operationId: getUser
+      responses:
+        '200':
+          description: The user.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [users]
+      summary: Update a user (caller's tenant only)
+      operationId: updateUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserInput' }
+      responses:
+        '200':
+          description: Updated user.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [users]
+      summary: Delete a user (caller's tenant only)
+      operationId: deleteUser
+      responses:
+        '204': { description: User deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/api-keys:
+    get:
+      tags: [api-keys]
+      summary: List the caller's tenant's API keys
+      operationId: listAPIKeys
+      responses:
+        '200':
+          description: API keys (hashes are never returned).
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/APIKey' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [api-keys]
+      summary: Issue an API key bound to the caller
+      description: |
+        The key is issued to the authenticated caller: body-supplied
+        `user_id` / `tenant_id` are ignored. The plaintext is returned once
+        and never stored.
+      operationId: issueAPIKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/APIKeyIssueRequest' }
+      responses:
+        '201':
+          description: Key issued; save the plaintext now.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/APIKeyIssueResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/api-keys/{id}:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    delete:
+      tags: [api-keys]
+      summary: Revoke an API key (caller's tenant only)
+      operationId: revokeAPIKey
+      responses:
+        '204': { description: Key revoked (idempotent). }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/audit-events:
+    get:
+      tags: [audit]
+      summary: Query the caller's tenant's audit trail
+      description: |
+        Read-only: every write verb on this path responds `405` — audit
+        entries are recorded only by trusted in-process emitters.
+      operationId: listAuditEvents
+      parameters:
+        - { name: actor, in: query, schema: { type: string } }
+        - { name: action, in: query, schema: { type: string } }
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: until, in: query, schema: { type: string, format: date-time } }
+        - $ref: '#/components/parameters/limit'
+      responses:
+        '200':
+          description: Audit events, newest first.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AuditEvent' } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '405': { description: The audit log is read-only over HTTP. }
+
+  /api/v1/content:
+    get:
+      tags: [content]
+      summary: List content in the caller's tenant
+      operationId: listContent
+      parameters:
+        - { name: kind, in: query, schema: { type: string }, description: 'Filter by kind (e.g. post, page).' }
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: Content list.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Content' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [content]
+      summary: Create content authored by the caller
+      description: '`tenant_id` and `author_id` are bound from the authenticated principal; body values are ignored.'
+      operationId: createContent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContentInput' }
+      responses:
+        '201':
+          description: Content created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Content' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/content/{id}:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    get:
+      tags: [content]
+      summary: Get content by ID (caller's tenant only)
+      operationId: getContent
+      responses:
+        '200':
+          description: The content row.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Content' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [content]
+      summary: Update content (caller's tenant only)
+      operationId: updateContent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContentInput' }
+      responses:
+        '200':
+          description: Updated content.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Content' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [content]
+      summary: Delete content (caller's tenant only)
+      operationId: deleteContent
+      responses:
+        '204': { description: Content deleted. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/content/{id}/publish:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    post:
+      tags: [content]
+      summary: Publish content (caller's tenant only)
+      operationId: publishContent
+      responses:
+        '204': { description: Published. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/content/{id}/unpublish:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    post:
+      tags: [content]
+      summary: Unpublish content (caller's tenant only)
+      operationId: unpublishContent
+      responses:
+        '204': { description: Unpublished. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/notifications:
+    get:
+      tags: [notifications]
+      summary: List the caller's own notifications
+      description: Bound to the authenticated user; a query-supplied user is ignored.
+      operationId: listNotifications
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: |
+            The caller's notifications, newest first. Note: this module's
+            JSON uses Go-cased field names (`ID`, `Title`, ...), unlike the
+            snake_case used elsewhere.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Notification' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [notifications]
+      summary: Create a notification for the caller
+      description: '`TenantID` and `UserID` are bound from the authenticated principal.'
+      operationId: createNotification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationInput' }
+      responses:
+        '201':
+          description: Notification created and dispatched to registered channels.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Notification' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/notifications/{id}/read:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    post:
+      tags: [notifications]
+      summary: Mark the caller's own notification read
+      description: Another user's notification — even a tenant-mate's — responds `404`.
+      operationId: markNotificationRead
+      responses:
+        '204': { description: Marked read. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/notification-subscriptions:
+    post:
+      tags: [notifications]
+      summary: Subscribe the caller to a category/channel
+      operationId: createSubscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubscriptionInput' }
+      responses:
+        '201':
+          description: Subscription created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/notification-subscriptions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/id'
+    delete:
+      tags: [notifications]
+      summary: Remove the caller's own subscription
+      description: Another user's subscription responds `404`.
+      operationId: deleteSubscription
+      responses:
+        '204': { description: Subscription removed. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /healthz:
+    get:
+      tags: [health]
+      summary: Aggregate module health (no auth)
+      security: []
+      operationId: healthz
+      responses:
+        '200': { description: Healthy or degraded., content: { application/json: { schema: { type: object } } } }
+        '503': { description: One or more components unhealthy., content: { application/json: { schema: { type: object } } } }
+
+  /live:
+    get:
+      tags: [health]
+      summary: Process liveness (no auth)
+      security: []
+      operationId: live
+      responses:
+        '204': { description: Process is serving. }
+
+  /ready:
+    get:
+      tags: [health]
+      summary: Readiness snapshot (no auth)
+      security: []
+      operationId: ready
+      responses:
+        '200': { description: Ready., content: { application/json: { schema: { type: object } } } }
+        '503': { description: Not ready., content: { application/json: { schema: { type: object } } } }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: A session ID returned by login, or an API key (`pk_...`).
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: pk_session
+      description: Session cookie set by the browser login page.
+
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 1000 }
+    offset:
+      name: offset
+      in: query
+      schema: { type: integer, minimum: 0 }
+
+  responses:
+    BadRequest:
+      description: Invalid input (malformed JSON or failed validation).
+      content: { text/plain: { schema: { type: string } } }
+    Unauthorized:
+      description: Missing, invalid, expired, or revoked credentials.
+      content: { text/plain: { schema: { type: string } } }
+    NotFound:
+      description: No such resource in the caller's tenant (cross-tenant IDs read as not found).
+      content: { text/plain: { schema: { type: string } } }
+    Conflict:
+      description: Uniqueness conflict (duplicate slug, email, username, or ID).
+      content: { text/plain: { schema: { type: string } } }
+
+  schemas:
+    LoginRequest:
+      type: object
+      required: [tenant_id, password]
+      properties:
+        tenant_id: { type: string, example: tenant_acme }
+        email: { type: string, example: admin@local.test }
+        username: { type: string, description: Alternative to email. }
+        password: { type: string, example: changeme }
+
+    Session:
+      type: object
+      properties:
+        id: { type: string, description: The bearer token. }
+        user_id: { type: string }
+        tenant_id: { type: string }
+        issued_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+
+    Tenant:
+      type: object
+      properties:
+        id: { type: string }
+        slug: { type: string }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    TenantInput:
+      type: object
+      required: [slug, name]
+      properties:
+        id: { type: string, description: Optional caller-assigned ID. }
+        slug: { type: string }
+        name: { type: string }
+
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        email: { type: string }
+        username: { type: string }
+        display_name: { type: string }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    UserInput:
+      type: object
+      required: [email, username]
+      properties:
+        id: { type: string, description: Optional caller-assigned ID. }
+        email: { type: string }
+        username: { type: string }
+        display_name: { type: string }
+        active: { type: boolean }
+
+    APIKey:
+      type: object
+      description: The stored key. The bcrypt hash is never serialized.
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        user_id: { type: string }
+        name: { type: string }
+        prefix: { type: string }
+        scopes: { type: array, items: { type: string } }
+        last_used_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        expires_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    APIKeyIssueRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, example: ci-bot }
+        scopes: { type: array, items: { type: string }, example: [read] }
+        ttl_seconds: { type: integer, description: 0 = no expiry. }
+
+    APIKeyIssueResponse:
+      type: object
+      properties:
+        plaintext: { type: string, description: Shown once; never stored. }
+        key: { $ref: '#/components/schemas/APIKey' }
+
+    AuditEvent:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        actor: { type: string }
+        action: { type: string }
+        resource: { type: string }
+        severity: { type: string }
+        details: { type: string }
+        emitted_at: { type: string, format: date-time }
+
+    Content:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        kind: { type: string }
+        slug: { type: string }
+        title: { type: string }
+        body: { type: string }
+        body_format: { type: string }
+        author_id: { type: string }
+        published_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ContentInput:
+      type: object
+      required: [kind, slug, title]
+      properties:
+        kind: { type: string, example: post }
+        slug: { type: string }
+        title: { type: string }
+        body: { type: string }
+        body_format: { type: string, example: markdown }
+
+    Notification:
+      type: object
+      description: |
+        Field names are Go-cased in this module (no JSON tags in v0.2.x) —
+        an acknowledged inconsistency with the rest of the API.
+      properties:
+        ID: { type: string }
+        TenantID: { type: string }
+        UserID: { type: string }
+        Title: { type: string }
+        Body: { type: string }
+        Category: { type: string }
+        Severity: { type: string, enum: [info, warning, critical] }
+        Data: { type: object, additionalProperties: true }
+        EmittedAt: { type: string, format: date-time }
+
+    NotificationInput:
+      type: object
+      required: [Title, Body]
+      properties:
+        Title: { type: string }
+        Body: { type: string }
+        Category: { type: string }
+        Severity: { type: string, enum: [info, warning, critical], default: info }
+        Data: { type: object, additionalProperties: true }
+
+    Subscription:
+      type: object
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        user_id: { type: string }
+        category: { type: string }
+        channel: { type: string, example: in_app }
+        created_at: { type: string, format: date-time }
+
+    SubscriptionInput:
+      type: object
+      required: [channel]
+      properties:
+        category: { type: string }
+        channel: { type: string, example: in_app }
