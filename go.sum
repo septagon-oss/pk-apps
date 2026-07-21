@@ -18,6 +18,8 @@ github.com/septagon-oss/pk-modules v0.1.0 h1:kiT+yUaqmvq6LkeRUXXbPDufI2XUNzZwSu/
 github.com/septagon-oss/pk-modules v0.1.0/go.mod h1:u/DKLO4BLtrb5yH2DjIqTcUIFf7J/318htJIVJ+b7nc=
 github.com/septagon-oss/pk-modules v0.2.0 h1:5rWD10IP2XilnAkQCREXhewXl+HajWirhcj9iN6Vpbw=
 github.com/septagon-oss/pk-modules v0.2.0/go.mod h1:NgE2kMSC/Mqji5oNvapFY8gXz4VS/FxRffesQ2kaVAU=
+github.com/septagon-oss/pk-modules v0.2.1 h1:3WBmh1gxKGWQxv3rTs86TLVolUc+EDTNJAOuYf26CdE=
+github.com/septagon-oss/pk-modules v0.2.1/go.mod h1:NgE2kMSC/Mqji5oNvapFY8gXz4VS/FxRffesQ2kaVAU=
 github.com/septagon-oss/pk-runtime v0.1.0 h1:Xbc3qksZMcwfJ3i7fD+DoFKmm8Dszbqza/oZ7sZ4n0E=
 github.com/septagon-oss/pk-runtime v0.1.0/go.mod h1:jvJKQeDUp5bo4BxXMKggWeHsEayWPgreMSNTnDHBQU0=
 github.com/septagon-oss/pk-shared v0.1.0 h1:KhnZ1nrnCwn+ZpNS2ozNK5R5WcXbJkcHbiXHMuNeVY0=
