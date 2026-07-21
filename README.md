@@ -1,5 +1,9 @@
 # pk-apps
 
+> Part of [PlatformKit](https://github.com/septagon-oss/platformkit) — the open-source Go backend for multi-tenant SaaS.
+
+**Depends on.** `pk-core`, `pk-modules`, `pk-runtime`, `pk-shared`, and `pk-testkit`. It sits at the top of the graph and pulls the family together.
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/septagon-oss/pk-apps.svg)](https://pkg.go.dev/github.com/septagon-oss/pk-apps)
 [![CI](https://github.com/septagon-oss/pk-apps/actions/workflows/go.yml/badge.svg)](https://github.com/septagon-oss/pk-apps/actions/workflows/go.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -56,7 +60,7 @@ config, adding modules, and tests.
 
 For a deeper walkthrough — what to read first, what to change first,
 and how to swap a provider — see the
-[Starter SaaS tutorial in pk-docs](https://github.com/septagon-oss/pk-docs/blob/main/docs/v0.0.0/starter-saas-tutorial.md).
+[quickstart in pk-docs](https://github.com/septagon-oss/pk-docs/blob/main/docs/v0.1.0/quickstart.md).
 
 ## Other examples
 
