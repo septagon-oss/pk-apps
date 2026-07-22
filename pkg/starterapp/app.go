@@ -540,9 +540,31 @@ func (a *App) indexHandler(w http.ResponseWriter, r *http.Request) {
 		len(a.modules), a.adminBasePath, a.seedEmail, a.seedPassword)
 }
 
-// ModuleIDs returns the human-ordered list of composed module IDs. Wrappers use
-// it for their startup banner; tests use it to assert the composed surface.
+// ModuleIDs returns the human-ordered list of catalog-composed module IDs.
+// Tests use it to assert the composed surface.
 func (a *App) ModuleIDs() []string { return a.modules }
+
+// AllModuleIDs returns every module the app serves — the catalog-composed
+// modules plus any contributed routes-only modules (starterapp.WithModules
+// that supplied no Compose). Wrappers use it for the startup banner so a
+// contributed module is visible on boot.
+func (a *App) AllModuleIDs() []string {
+	seen := make(map[string]bool, len(a.modules))
+	out := make([]string, 0, len(a.modules)+len(a.extra))
+	for _, id := range a.modules {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	for _, p := range a.extra {
+		if !seen[p.ID] {
+			seen[p.ID] = true
+			out = append(out, p.ID)
+		}
+	}
+	return out
+}
 
 // AdminBasePath is the mount path of the admin shell (e.g. "/admin").
 func (a *App) AdminBasePath() string { return a.adminBasePath }

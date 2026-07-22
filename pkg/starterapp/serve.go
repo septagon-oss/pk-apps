@@ -93,7 +93,8 @@ func printBanner(cfg *Config, app *App) {
 	fmt.Printf("  health:       http://localhost%s/healthz\n", cfg.HTTP.Addr)
 	fmt.Printf("  metrics:      http://localhost%s/metrics\n", cfg.HTTP.Addr)
 	fmt.Printf("  default login: %s / %s\n", app.seedEmail, app.seedPassword)
-	fmt.Printf("  modules:      %d composed (%s)\n", len(app.modules), strings.Join(app.modules, ", "))
+	ids := app.AllModuleIDs()
+	fmt.Printf("  modules:      %d composed (%s)\n", len(ids), strings.Join(ids, ", "))
 	fmt.Println(bar)
 	printDevelopmentWarning(cfg)
 }

@@ -231,8 +231,10 @@ func TestRequestBodyIsCapped(t *testing.T) {
 		t.Fatalf("oversized create: %v", err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode < 400 {
-		t.Fatalf("oversized body accepted with status %d — request body is not capped", resp.StatusCode)
+	// A declared over-cap Content-Length must produce a clear 413, not a
+	// misleading 400 "invalid JSON" from a truncated read.
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body = %d, want 413 Request Entity Too Large", resp.StatusCode)
 	}
 }
 
