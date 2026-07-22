@@ -196,10 +196,10 @@ func TestOpenAPISpecMatchesApp(t *testing.T) {
 	call("POST", "/api/v1/content/{id}/unpublish", "/api/v1/content/"+id(c, "id")+"/unpublish", "", true, 204)
 	call("DELETE", "/api/v1/content/{id}", "/api/v1/content/"+id(c, "id"), "", true, 204)
 
-	// --- notifications (Go-cased JSON in v0.2.x) ---
-	n := call("POST", "/api/v1/notifications", "/api/v1/notifications", `{"Title":"Conf","Body":"hello"}`, true, 201)
+	// --- notifications (snake_case JSON, consistent with the rest of the API) ---
+	n := call("POST", "/api/v1/notifications", "/api/v1/notifications", `{"title":"Conf","body":"hello"}`, true, 201)
 	call("GET", "/api/v1/notifications", "/api/v1/notifications", "", true, 200)
-	call("POST", "/api/v1/notifications/{id}/read", "/api/v1/notifications/"+id(n, "ID")+"/read", "", true, 204)
+	call("POST", "/api/v1/notifications/{id}/read", "/api/v1/notifications/"+id(n, "id")+"/read", "", true, 204)
 	s := call("POST", "/api/v1/notification-subscriptions", "/api/v1/notification-subscriptions", `{"channel":"in_app","category":"system"}`, true, 201)
 	call("DELETE", "/api/v1/notification-subscriptions/{id}", "/api/v1/notification-subscriptions/"+id(s, "id"), "", true, 204)
 

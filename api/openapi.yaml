@@ -440,10 +440,7 @@ paths:
         - $ref: '#/components/parameters/offset'
       responses:
         '200':
-          description: |
-            The caller's notifications, newest first. Note: this module's
-            JSON uses Go-cased field names (`ID`, `Title`, ...), unlike the
-            snake_case used elsewhere.
+          description: The caller's notifications, newest first.
           content:
             application/json:
               schema: { type: array, items: { $ref: '#/components/schemas/Notification' } }
@@ -451,7 +448,7 @@ paths:
     post:
       tags: [notifications]
       summary: Create a notification for the caller
-      description: '`TenantID` and `UserID` are bound from the authenticated principal.'
+      description: '`tenant_id` and `user_id` are bound from the authenticated principal.'
       operationId: createNotification
       requestBody:
         required: true
@@ -710,29 +707,26 @@ components:
 
     Notification:
       type: object
-      description: |
-        Field names are Go-cased in this module (no JSON tags in v0.2.x) —
-        an acknowledged inconsistency with the rest of the API.
       properties:
-        ID: { type: string }
-        TenantID: { type: string }
-        UserID: { type: string }
-        Title: { type: string }
-        Body: { type: string }
-        Category: { type: string }
-        Severity: { type: string, enum: [info, warning, critical] }
-        Data: { type: object, additionalProperties: true }
-        EmittedAt: { type: string, format: date-time }
+        id: { type: string }
+        tenant_id: { type: string }
+        user_id: { type: string }
+        title: { type: string }
+        body: { type: string }
+        category: { type: string }
+        severity: { type: string, enum: [info, warning, critical] }
+        data: { type: object, additionalProperties: true }
+        emitted_at: { type: string, format: date-time }
 
     NotificationInput:
       type: object
-      required: [Title, Body]
+      required: [title, body]
       properties:
-        Title: { type: string }
-        Body: { type: string }
-        Category: { type: string }
-        Severity: { type: string, enum: [info, warning, critical], default: info }
-        Data: { type: object, additionalProperties: true }
+        title: { type: string }
+        body: { type: string }
+        category: { type: string }
+        severity: { type: string, enum: [info, warning, critical], default: info }
+        data: { type: object, additionalProperties: true }
 
     Subscription:
       type: object

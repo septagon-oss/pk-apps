@@ -3,8 +3,10 @@ package main
 // Implements: REQ-016.
 // Per: ADR-0017.
 // Discipline: C-14.
-// main.go demonstrates composing the minimal OSS module bundle into an HTTP
-// runtime host.
+// main.go demonstrates wiring the low-level pk-runtime host around the
+// coremodules TEACHING bundle (three stub modules, NOT the product). For a
+// real, runnable app use starterapp.Run; to add your own module to it, see
+// examples/custommodule.
 //
 // ADR: ADR-0017 (composition through dependency injection), ADR-0029 (file purpose declaration).
 // Convention: C-14 (every Go file declares its purpose).

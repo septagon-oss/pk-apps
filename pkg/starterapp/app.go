@@ -99,15 +99,20 @@ type App struct {
 	adminBasePath string
 	seedEmail     string
 	seedPassword  string
+
+	// extra holds contributed modules (starterapp.WithModules); Mux mounts
+	// their routes on the shared mux behind the same middleware as the built-ins.
+	extra []ModulePlugin
 }
 
 // BuildApp constructs every module against the shared SQLite DSN and runs the
 // first-boot seed. It is the single source of truth for the application's
 // dependency graph and is used by every runnable wrapper and by tests.
-func BuildApp(ctx context.Context, cfg *Config) (*App, error) {
+func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("starterapp: nil config")
 	}
+	appOpts := applyOptions(opts)
 	dsn := cfg.Database.DSN
 	if dsn == "" {
 		return nil, fmt.Errorf("starterapp: database.dsn is required")
@@ -313,21 +318,50 @@ func BuildApp(ctx context.Context, cfg *Config) (*App, error) {
 		content.ModuleID,
 		notification.ModuleID,
 	}
-	bundle := pkmodule.NewBundle(
-		BundleName,
-		[]pkmodule.Entry{
-			{ID: admin.ModuleID, New: adminMod.Compose},
-			{ID: healthmod.ModuleID, New: healthMod.Compose},
-			{ID: tenant.ModuleID, New: tenantMod.Compose},
-			{ID: user.ModuleID, New: userMod.Compose},
-			{ID: audit.ModuleID, New: auditMod.Compose},
-			{ID: auth.ModuleID, New: authMod.Compose},
-			{ID: apikey.ModuleID, New: apiKeyMod.Compose},
-			{ID: content.ModuleID, New: contentMod.Compose},
-			{ID: notification.ModuleID, New: notificationMod.Compose},
-		},
-		modules,
-	)
+	entries := []pkmodule.Entry{
+		{ID: admin.ModuleID, New: adminMod.Compose},
+		{ID: healthmod.ModuleID, New: healthMod.Compose},
+		{ID: tenant.ModuleID, New: tenantMod.Compose},
+		{ID: user.ModuleID, New: userMod.Compose},
+		{ID: audit.ModuleID, New: auditMod.Compose},
+		{ID: auth.ModuleID, New: authMod.Compose},
+		{ID: apikey.ModuleID, New: apiKeyMod.Compose},
+		{ID: content.ModuleID, New: contentMod.Compose},
+		{ID: notification.ModuleID, New: notificationMod.Compose},
+	}
+
+	// Contributed modules (starterapp.WithModules). Each is built against the
+	// shared DB + registrars, joins the catalog when it supplies a Compose,
+	// and has its routes mounted by Mux() behind the same middleware.
+	builtinIDs := map[string]bool{}
+	for _, id := range modules {
+		builtinIDs[id] = true
+	}
+	var extraPlugins []ModulePlugin
+	env := ModuleEnv{DB: db, Admin: adminReg, Health: healthReg}
+	for _, build := range appOpts.extra {
+		plugin, err := build(env)
+		if err != nil {
+			return nil, fmt.Errorf("contributed module: %w", err)
+		}
+		if plugin.ID == "" {
+			return nil, fmt.Errorf("contributed module: empty ID")
+		}
+		if builtinIDs[plugin.ID] {
+			return nil, fmt.Errorf("contributed module %q collides with a built-in module ID", plugin.ID)
+		}
+		if plugin.RegisterRoutes == nil {
+			return nil, fmt.Errorf("contributed module %q: RegisterRoutes is required", plugin.ID)
+		}
+		builtinIDs[plugin.ID] = true
+		if plugin.Compose != nil {
+			entries = append(entries, pkmodule.Entry{ID: plugin.ID, New: plugin.Compose})
+			modules = append(modules, plugin.ID)
+		}
+		extraPlugins = append(extraPlugins, plugin)
+	}
+
+	bundle := pkmodule.NewBundle(BundleName, entries, modules)
 	catalog, err := pkmodule.NewCatalog().Add(bundle).Build()
 	if err != nil {
 		return nil, fmt.Errorf("catalog build: %w", err)
@@ -366,6 +400,7 @@ func BuildApp(ctx context.Context, cfg *Config) (*App, error) {
 		db:            db,
 		modules:       modules,
 		adminBasePath: adminMod.BasePath(),
+		extra:         extraPlugins,
 	}
 	app.seedEmail, app.seedPassword = seedBannerCredential(cfg, seedParams)
 	return app, nil
@@ -412,6 +447,13 @@ func (a *App) Mux() (http.Handler, error) {
 	a.apiKey.HTTPHandler().RegisterRoutes(mux)
 	a.contentMod.HTTPHandler().RegisterRoutes(mux)
 	a.notification.HTTPHandler().RegisterRoutes(mux)
+
+	// Contributed modules (starterapp.WithModules) mount their routes here, on
+	// the same mux — so they sit behind the same identity, mutation-gate, and
+	// request-body-cap middleware as the built-ins.
+	for _, plugin := range a.extra {
+		plugin.RegisterRoutes(mux)
+	}
 
 	// Health endpoint at /healthz (the module's APIPath constant).
 	a.health.HTTPHandler().RegisterRoutes(mux)

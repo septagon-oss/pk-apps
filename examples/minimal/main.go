@@ -3,7 +3,10 @@ package main
 // Implements: REQ-016.
 // Per: ADR-0017.
 // Discipline: C-14.
-// main.go demonstrates composing the minimal OSS PlatformKit module bundle.
+// main.go demonstrates the low-level pk-core composition primitive
+// (catalog -> Compose) using coremodules — a TEACHING bundle of three stub
+// modules, NOT the product. For a real, runnable app use starterapp.Run; to
+// add your own module to it, see examples/custommodule.
 //
 // ADR: ADR-0017 (composition through dependency injection), ADR-0029 (file purpose declaration).
 // Convention: C-14 (every Go file declares its purpose).

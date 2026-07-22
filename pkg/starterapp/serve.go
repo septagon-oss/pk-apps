@@ -32,8 +32,8 @@ import (
 // instead of calling log.Fatal so deferred cleanup — notably App.Close, which
 // releases the shared *sql.DB — runs on every failure path, not just on clean
 // shutdown. A nil return means a clean shutdown.
-func Run(ctx context.Context, cfg *Config) error {
-	app, err := BuildApp(ctx, cfg)
+func Run(ctx context.Context, cfg *Config, opts ...Option) error {
+	app, err := BuildApp(ctx, cfg, opts...)
 	if err != nil {
 		return fmt.Errorf("build app: %w", err)
 	}
