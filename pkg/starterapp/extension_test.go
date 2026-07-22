@@ -87,6 +87,72 @@ func TestWithModulesContributesAModule(t *testing.T) {
 	}
 }
 
+func TestWithModulesPublicRoutesBypassTheGate(t *testing.T) {
+	t.Parallel()
+	cfg := extTestConfig(t)
+
+	// A module with BOTH surfaces: an anonymous public join and an
+	// authenticated owner view.
+	plugin := func(env ModuleEnv) (ModulePlugin, error) {
+		return ModulePlugin{
+			ID: "signups",
+			RegisterPublicRoutes: func(mux *http.ServeMux) {
+				mux.HandleFunc("/join/", func(w http.ResponseWriter, r *http.Request) {
+					// Anonymous POST — would be 401 under the mutation gate.
+					w.WriteHeader(http.StatusCreated)
+					_, _ = w.Write([]byte("joined"))
+				})
+			},
+			RegisterRoutes: func(mux *http.ServeMux) {
+				mux.HandleFunc("/api/v1/signups", func(w http.ResponseWriter, r *http.Request) {
+					if _, _, ok := portslib.RequestActor(w, r); !ok {
+						return
+					}
+					_, _ = w.Write([]byte("owner-view"))
+				})
+			},
+		}, nil
+	}
+
+	app, err := BuildApp(context.Background(), cfg, WithModules(plugin))
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	defer app.Close()
+	srv := httptest.NewServer(mustMux(t, app))
+	defer srv.Close()
+
+	// Public POST works anonymously (the whole point).
+	resp, err := http.Post(srv.URL+"/join/acme", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("public post: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("public POST /join = %d, want 201 (public route must bypass the mutation gate)", resp.StatusCode)
+	}
+
+	// The authenticated route is still gated: anonymous → 401.
+	anon, err := http.Get(srv.URL + "/api/v1/signups")
+	if err != nil {
+		t.Fatalf("anon get: %v", err)
+	}
+	anon.Body.Close()
+	if anon.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous owner view = %d, want 401 (authenticated routes stay gated)", anon.StatusCode)
+	}
+
+	// A built-in mutation is still gated too (defense in depth intact).
+	bad, err := http.Post(srv.URL+"/api/v1/users", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("anon builtin post: %v", err)
+	}
+	bad.Body.Close()
+	if bad.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous POST /api/v1/users = %d, want 401 (public mux must not disarm the gate)", bad.StatusCode)
+	}
+}
+
 func TestWithModulesRejectsBuiltinIDCollision(t *testing.T) {
 	t.Parallel()
 	clash := func(env ModuleEnv) (ModulePlugin, error) {
@@ -104,7 +170,7 @@ func TestWithModulesRequiresRoutes(t *testing.T) {
 		return ModulePlugin{ID: "widget"}, nil // RegisterRoutes nil
 	}
 	_, err := BuildApp(context.Background(), extTestConfig(t), WithModules(noRoutes))
-	if err == nil || !strings.Contains(err.Error(), "RegisterRoutes is required") {
-		t.Fatalf("expected RegisterRoutes-required error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "RegisterRoutes or RegisterPublicRoutes is required") {
+		t.Fatalf("expected routes-required error, got %v", err)
 	}
 }

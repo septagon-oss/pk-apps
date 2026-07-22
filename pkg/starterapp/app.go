@@ -350,8 +350,8 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		if builtinIDs[plugin.ID] {
 			return nil, fmt.Errorf("contributed module %q collides with a built-in module ID", plugin.ID)
 		}
-		if plugin.RegisterRoutes == nil {
-			return nil, fmt.Errorf("contributed module %q: RegisterRoutes is required", plugin.ID)
+		if plugin.RegisterRoutes == nil && plugin.RegisterPublicRoutes == nil {
+			return nil, fmt.Errorf("contributed module %q: RegisterRoutes or RegisterPublicRoutes is required", plugin.ID)
 		}
 		builtinIDs[plugin.ID] = true
 		if plugin.Compose != nil {
@@ -448,11 +448,19 @@ func (a *App) Mux() (http.Handler, error) {
 	a.contentMod.HTTPHandler().RegisterRoutes(mux)
 	a.notification.HTTPHandler().RegisterRoutes(mux)
 
-	// Contributed modules (starterapp.WithModules) mount their routes here, on
-	// the same mux — so they sit behind the same identity, mutation-gate, and
-	// request-body-cap middleware as the built-ins.
+	// Contributed modules (starterapp.WithModules): authenticated routes go on
+	// the main mux (behind the mutation gate); public routes go on a separate
+	// mux that the wrapper checks first and serves without the gate.
+	publicMux := http.NewServeMux()
+	havePublic := false
 	for _, plugin := range a.extra {
-		plugin.RegisterRoutes(mux)
+		if plugin.RegisterRoutes != nil {
+			plugin.RegisterRoutes(mux)
+		}
+		if plugin.RegisterPublicRoutes != nil {
+			plugin.RegisterPublicRoutes(publicMux)
+			havePublic = true
+		}
 	}
 
 	// Health endpoint at /healthz (the module's APIPath constant).
@@ -484,12 +492,28 @@ func (a *App) Mux() (http.Handler, error) {
 		newAPIKeyResolver(a.apiKey.Service()),
 		newSessionResolver(a.authMod.Service()),
 	)
+	// The authenticated surface sits behind the mutation gate. When contributed
+	// modules registered public routes, a thin dispatcher checks the public mux
+	// first and serves a match without the gate; everything else falls through
+	// to the gated surface. Both are still wrapped by identity resolution (so a
+	// presented credential is honored on public routes) and the body cap.
+	var routed http.Handler = requireAuthenticatedMutations(mux)
+	if havePublic {
+		gated := routed
+		routed = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, pattern := publicMux.Handler(r); pattern != "" {
+				publicMux.ServeHTTP(w, r)
+				return
+			}
+			gated.ServeHTTP(w, r)
+		})
+	}
 	// limitRequestBody is the OUTERMOST wrapper so it caps EVERY request body —
 	// including the pre-auth login POST — before any handler reads it. Without
 	// it, json.Decode buffers an unbounded body (an anonymous multi-GB login
 	// body is a memory-exhaustion DoS).
 	handler := limitRequestBody(maxRequestBodyBytes,
-		identity.Middleware(resolver)(requireAuthenticatedMutations(mux)))
+		identity.Middleware(resolver)(routed))
 	return handler, nil
 }
 

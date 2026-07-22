@@ -44,8 +44,18 @@ type ModulePlugin struct {
 	// validates its declared dependencies at compose time. It is the same
 	// func(yourModule).Compose the built-ins register.
 	Compose pkmodule.Constructor
-	// RegisterRoutes mounts the module's HTTP routes on the shared mux.
+	// RegisterRoutes mounts the module's AUTHENTICATED HTTP routes. They sit
+	// behind the full perimeter: identity resolution, the anonymous-mutation
+	// gate, and the request-body cap — exactly like the built-in modules.
+	// Optional (a module may be public-only).
 	RegisterRoutes func(mux *http.ServeMux)
+	// RegisterPublicRoutes mounts routes that are reachable WITHOUT
+	// authentication — public forms (a waitlist join), inbound webhooks, public
+	// status pages, redirects. They still get identity resolution (so
+	// RequestActor works when a credential IS presented) and the request-body
+	// cap, but they bypass the anonymous-mutation gate at any path. Use this
+	// only for surfaces you intend to be world-reachable. Optional.
+	RegisterPublicRoutes func(mux *http.ServeMux)
 }
 
 // ExtraModule builds one contributed module from the shared environment. It

@@ -60,9 +60,15 @@ func widgetModule(env starterapp.ModuleEnv) (starterapp.ModulePlugin, error) {
 	if err != nil {
 		return starterapp.ModulePlugin{}, err
 	}
+	h := &widgetHandler{store: store}
 	return starterapp.ModulePlugin{
 		ID:             "widget",
-		RegisterRoutes: (&widgetHandler{store: store}).RegisterRoutes,
+		RegisterRoutes: h.RegisterRoutes,
+		// A public, unauthenticated count endpoint — reachable without a
+		// bearer, bypassing the mutation gate, but still tenant-derived from
+		// the {slug} path rather than a credential. This is how a module
+		// exposes a public surface (a join form, a webhook, a status page).
+		RegisterPublicRoutes: h.RegisterPublicRoutes,
 	}, nil
 }
 
@@ -128,6 +134,27 @@ type widgetHandler struct{ store *widgetStore }
 func (h *widgetHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/v1/widgets", h)
 	mux.Handle("/api/v1/widgets/", h)
+}
+
+// RegisterPublicRoutes mounts an anonymous endpoint: GET /w/{tenant}/count
+// returns how many widgets a tenant has, no bearer required. The tenant comes
+// from the path, not a credential — the public equivalent of a status page.
+//
+//	curl -s localhost:8080/w/tenant_acme/count
+func (h *widgetHandler) RegisterPublicRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/w/", func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/w/"), "/"), "/")
+		if len(parts) != 2 || parts[1] != "count" || parts[0] == "" {
+			http.NotFound(w, r)
+			return
+		}
+		items, err := h.store.list(parts[0])
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tenant": parts[0], "widgets": len(items)}, nil)
+	})
 }
 
 func (h *widgetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
