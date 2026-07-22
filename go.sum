@@ -14,8 +14,8 @@ github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
 github.com/septagon-oss/pk-core v0.1.0 h1:FrknTc7u6nPiG8eh5yhfH+wANWMCr3vldFnS5zPg3vM=
 github.com/septagon-oss/pk-core v0.1.0/go.mod h1:Bc0Vl7PxXdpAtkyNRo4fSvayYPX6VOtgC45m/k6bsJ0=
-github.com/septagon-oss/pk-modules v0.2.2 h1:1MprMau9bpbD5x0uKMZOu71/QKmwxEwWhlNBGC0gBVc=
-github.com/septagon-oss/pk-modules v0.2.2/go.mod h1:NgE2kMSC/Mqji5oNvapFY8gXz4VS/FxRffesQ2kaVAU=
+github.com/septagon-oss/pk-modules v0.2.3 h1:MxqmW9Be8de5YDfGjX2pd7PpDQDNK6k5CGKhlrgDfAg=
+github.com/septagon-oss/pk-modules v0.2.3/go.mod h1:NgE2kMSC/Mqji5oNvapFY8gXz4VS/FxRffesQ2kaVAU=
 github.com/septagon-oss/pk-runtime v0.1.0 h1:Xbc3qksZMcwfJ3i7fD+DoFKmm8Dszbqza/oZ7sZ4n0E=
 github.com/septagon-oss/pk-runtime v0.1.0/go.mod h1:jvJKQeDUp5bo4BxXMKggWeHsEayWPgreMSNTnDHBQU0=
 github.com/septagon-oss/pk-shared v0.1.0 h1:KhnZ1nrnCwn+ZpNS2ozNK5R5WcXbJkcHbiXHMuNeVY0=
