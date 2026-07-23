@@ -598,6 +598,114 @@ func TestBootstrapMigrationRejectsReusedReleasedAdministratorID(t *testing.T) {
 	}
 }
 
+func TestBootstrapMigrationPreservesExplicitlyConfiguredAdministrator(t *testing.T) {
+	for _, tenantMissing := range []bool{false, true} {
+		name := "tenant-present"
+		if tenantMissing {
+			name = "tenant-missing"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := freshConfig(t)
+			cfg.Environment = "production"
+			cfg.Seed.AdminEmail = "owner@customer.test"
+			cfg.Seed.AdminPassword = "configured-bootstrap-password"
+			createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+			hasher, err := passhash.NewBcrypt(passhash.MinCost)
+			if err != nil {
+				t.Fatalf("create explicit-owner password hasher: %v", err)
+			}
+			ownerPassword := "owner-private-password"
+			ownerHash, err := hasher.Hash(ownerPassword)
+			if err != nil {
+				t.Fatalf("hash explicit-owner password: %v", err)
+			}
+			ordinaryPassword := "ordinary-private-password"
+			ordinaryHash, err := hasher.Hash(ordinaryPassword)
+			if err != nil {
+				t.Fatalf("hash released-ID owner's password: %v", err)
+			}
+
+			db, err := sql.Open("sqlite", cfg.Database.DSN)
+			if err != nil {
+				t.Fatalf("open explicit-owner fixture: %v", err)
+			}
+			now := time.Now().UTC()
+			if _, err := db.ExecContext(
+				ctx,
+				`UPDATE users
+				 SET pass_hash = ?, display_name = 'Ordinary User'
+				 WHERE id = ? AND tenant_id = ?`,
+				ordinaryHash,
+				releasedBootstrapUserID,
+				releasedBootstrapTenantID,
+			); err != nil {
+				t.Fatalf("make released ID an ordinary account: %v", err)
+			}
+			if _, err := db.ExecContext(
+				ctx,
+				`INSERT INTO users
+				 (id, tenant_id, email, username, pass_hash, display_name, active, created_at, updated_at)
+				 VALUES ('replacement_owner', ?, ?, 'owner', ?, 'Configured Owner', 1, ?, ?)`,
+				releasedBootstrapTenantID,
+				cfg.Seed.AdminEmail,
+				ownerHash,
+				now,
+				now,
+			); err != nil {
+				t.Fatalf("insert explicitly configured owner: %v", err)
+			}
+			if tenantMissing {
+				if _, err := db.ExecContext(
+					ctx,
+					`DELETE FROM tenants WHERE id = ?`,
+					releasedBootstrapTenantID,
+				); err != nil {
+					t.Fatalf("delete released tenant: %v", err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatalf("close explicit-owner fixture: %v", err)
+			}
+
+			app, err := BuildApp(ctx, cfg)
+			if err != nil {
+				t.Fatalf("BuildApp() with explicit owner: %v", err)
+			}
+			defer app.Close()
+
+			if app.adminSubject != "replacement_owner" {
+				t.Fatalf("adminSubject = %q, want explicitly configured owner", app.adminSubject)
+			}
+			if err := app.user.Service().VerifyPassword(
+				ctx,
+				releasedBootstrapTenantID,
+				"replacement_owner",
+				ownerPassword,
+			); err != nil {
+				t.Fatalf("configured owner's password changed: %v", err)
+			}
+			if err := app.user.Service().VerifyPassword(
+				ctx,
+				releasedBootstrapTenantID,
+				releasedBootstrapUserID,
+				ordinaryPassword,
+			); err != nil {
+				t.Fatalf("ordinary released-ID owner's password changed: %v", err)
+			}
+			if err := app.user.Service().VerifyPassword(
+				ctx,
+				releasedBootstrapTenantID,
+				releasedBootstrapUserID,
+				cfg.Seed.AdminPassword,
+			); err == nil {
+				t.Fatal("ordinary released-ID owner received the bootstrap password")
+			}
+		})
+	}
+}
+
 func TestBootstrapMigrationRevokesReleasedCredentialsWhenIDIsForeign(t *testing.T) {
 	ctx := context.Background()
 	cfg := freshConfig(t)
@@ -826,7 +934,6 @@ func TestBootstrapMigrationChoosesNonconflictingNeutralLabels(t *testing.T) {
 	cfg := freshConfig(t)
 	createLegacyBootstrapFixture(t, cfg.Database.DSN)
 	cfg.Environment = "production"
-	cfg.Seed.AdminEmail = seed.UserEmail
 	cfg.Seed.AdminPassword = "production-bootstrap-password"
 
 	hasher, err := passhash.NewBcrypt(passhash.MinCost)
@@ -1203,6 +1310,58 @@ func TestBootstrapMigrationFindsReleasedIDsInUnknownExtensionTable(t *testing.T)
 			extensionTenant,
 			extensionOwner,
 		)
+	}
+}
+
+func TestBootstrapReferenceScanUsesIdentityColumnsAndHandlesWideTables(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open reference-scan fixture: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.ExecContext(
+		ctx,
+		`CREATE TABLE extension_notes (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+		 INSERT INTO extension_notes (id, body) VALUES ('note-1', ?)`,
+		releasedBootstrapTenantID,
+	); err != nil {
+		t.Fatalf("create ordinary-text fixture: %v", err)
+	}
+	found, err := releasedBootstrapReferencesExist(ctx, db)
+	if err != nil {
+		t.Fatalf("scan ordinary text: %v", err)
+	}
+	if found {
+		t.Fatal("ordinary text mentioning a released ID was treated as an identity reference")
+	}
+
+	columns := make([]string, 0, 601)
+	for i := range 600 {
+		columns = append(columns, fmt.Sprintf("field_%d TEXT", i))
+	}
+	columns = append(columns, "tenant_id TEXT")
+	if _, err := db.ExecContext(
+		ctx,
+		`CREATE TABLE wide_extension (`+strings.Join(columns, ", ")+`)`,
+	); err != nil {
+		t.Fatalf("create wide extension table: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO wide_extension (tenant_id) VALUES (?)`,
+		releasedBootstrapTenantID,
+	); err != nil {
+		t.Fatalf("insert wide extension reference: %v", err)
+	}
+	found, err = releasedBootstrapReferencesExist(ctx, db)
+	if err != nil {
+		t.Fatalf("scan wide extension table: %v", err)
+	}
+	if !found {
+		t.Fatal("wide extension tenant_id reference was not detected")
 	}
 }
 

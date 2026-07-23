@@ -142,97 +142,95 @@ func resolveBootstrapIdentity(
 		return bootstrapIdentity{}, fmt.Errorf("starterapp: inspect current bootstrap administrator: %w", err)
 	}
 
-	findPriorEmailKeyedAdministrators := func() ([]string, error) {
-		// A replacement bootstrap administrator may have been provisioned
-		// under an application-owned ID. Resolve that identity by the released
-		// email or an explicitly configured email: previous releases did not
-		// reserve seed.UserID or seed.UserEmail, so either current default may
-		// legitimately belong to an unrelated account.
-		query := `SELECT id
-			FROM users
-			WHERE (tenant_id = ? AND email = ?)`
-		args := []any{legacyBootstrapTenantID, legacyBootstrapUserEmail}
-		if adminEmailConfigured && adminEmail != legacyBootstrapUserEmail {
-			query += ` OR (tenant_id = ? AND email = ?)`
-			args = append(args, legacyBootstrapTenantID, adminEmail)
+	type priorAdministratorCandidates struct {
+		historicalID string
+		configuredID string
+	}
+	findEmailOwner := func(email string) (string, error) {
+		var id string
+		err := db.QueryRowContext(
+			ctx,
+			`SELECT id FROM users WHERE tenant_id = ? AND email = ?`,
+			legacyBootstrapTenantID,
+			email,
+		).Scan(&id)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return "", nil
+		case err != nil:
+			return "", err
+		default:
+			return id, nil
 		}
-		query += ` ORDER BY id`
-		rows, err := db.QueryContext(ctx, query, args...)
+	}
+	findPriorAdministrators := func() (priorAdministratorCandidates, error) {
+		// Keep the released-email signal separate from the operator's explicit
+		// configured-email signal. Combining them into one slice made the
+		// released ID win whenever it still owned the historical address, even
+		// when a different account was the configured administrator.
+		historicalID, err := findEmailOwner(legacyBootstrapUserEmail)
 		if err != nil {
-			return nil, err
+			return priorAdministratorCandidates{}, err
 		}
-		var ids []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				_ = rows.Close()
-				return nil, err
+		candidates := priorAdministratorCandidates{historicalID: historicalID}
+		if adminEmailConfigured {
+			configuredID, lookupErr := findEmailOwner(adminEmail)
+			if lookupErr != nil {
+				return priorAdministratorCandidates{}, lookupErr
 			}
-			ids = append(ids, id)
+			candidates.configuredID = configuredID
 		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, err
+		return candidates, nil
+	}
+	selectPriorAdministrator := func(
+		candidates priorAdministratorCandidates,
+		legacyUserBelongsToTenant bool,
+	) (string, bool, error) {
+		// An explicitly configured address is the operator's authoritative
+		// selection. Preserve its current owner rather than moving authority to
+		// an account that merely retained the released default address.
+		if candidates.configuredID != "" {
+			return candidates.configuredID, true, nil
 		}
-		if err := rows.Close(); err != nil {
-			return nil, err
+		if legacyUserBelongsToTenant {
+			switch candidates.historicalID {
+			case "", legacyBootstrapUserID:
+				// The durable released ID either owns the historical address or
+				// has a customized address with no conflicting historical owner.
+				return legacyBootstrapUserID, true, nil
+			default:
+				return "", false, fmt.Errorf(
+					"released bootstrap administrator %q conflicts with historical-email owner %q",
+					legacyBootstrapUserID,
+					candidates.historicalID,
+				)
+			}
 		}
-		return ids, nil
+		if candidates.historicalID != "" {
+			return candidates.historicalID, true, nil
+		}
+		return "", false, nil
 	}
 
 	if legacyTenantExists {
 		legacyUserBelongsToTenant := legacyUserExists && legacyUserTenant == legacyBootstrapTenantID
-		emailKeyedIDs, err := findPriorEmailKeyedAdministrators()
+		candidates, err := findPriorAdministrators()
 		if err != nil {
 			return bootstrapIdentity{}, fmt.Errorf("starterapp: find prior email-keyed administrator: %w", err)
 		}
-		if legacyUserBelongsToTenant {
-			releasedUserMatchesEmail := false
-			for _, id := range emailKeyedIDs {
-				if id == legacyBootstrapUserID {
-					releasedUserMatchesEmail = true
-					break
-				}
-			}
-			switch {
-			case releasedUserMatchesEmail:
-				// Stable ID and historical email identify the same user.
-			case len(emailKeyedIDs) == 0:
-				// The durable released ID is authoritative when its operator
-				// customized the email and no conflicting historical signal
-				// remains.
-			default:
-				// A reused released ID and a different email-keyed owner are
-				// indistinguishable without the ledger. Refuse to grant
-				// administrator scope to either account.
-				return bootstrapIdentity{}, fmt.Errorf(
-					"starterapp: conflicting released bootstrap administrator %q and email-keyed candidates under tenant %q: %v",
-					legacyBootstrapUserID,
-					legacyBootstrapTenantID,
-					emailKeyedIDs,
-				)
-			}
-			return bootstrapIdentity{
-				TenantID: legacyBootstrapTenantID,
-				UserID:   legacyBootstrapUserID,
-			}, nil
-		}
-		switch len(emailKeyedIDs) {
-		case 1:
-			return bootstrapIdentity{
-				TenantID: legacyBootstrapTenantID,
-				UserID:   emailKeyedIDs[0],
-			}, nil
-		case 0:
-			// A partial prior boot may have created the tenant but not the
-			// administrator. Recreate the released durable user ID when it is
-			// still available so contributed-module references remain valid.
-		default:
+		priorUserID, found, selectErr := selectPriorAdministrator(candidates, legacyUserBelongsToTenant)
+		if selectErr != nil {
 			return bootstrapIdentity{}, fmt.Errorf(
-				"starterapp: ambiguous prior email-keyed administrators under tenant %q: %v",
+				"starterapp: conflicting released bootstrap administrator under tenant %q: %w",
 				legacyBootstrapTenantID,
-				emailKeyedIDs,
+				selectErr,
 			)
+		}
+		if found {
+			return bootstrapIdentity{
+				TenantID: legacyBootstrapTenantID,
+				UserID:   priorUserID,
+			}, nil
 		}
 
 		// No released administrator survived (for example, a partial old
@@ -281,57 +279,33 @@ func resolveBootstrapIdentity(
 		// its bootstrap administrator. Recover that administrator before
 		// falling back to the released user ID, or boot would create a second
 		// privileged user and detach the surviving references from the owner.
-		emailKeyedIDs, lookupErr := findPriorEmailKeyedAdministrators()
+		candidates, lookupErr := findPriorAdministrators()
 		if lookupErr != nil {
 			return bootstrapIdentity{}, fmt.Errorf(
 				"starterapp: find prior email-keyed administrator without tenant row: %w",
 				lookupErr,
 			)
 		}
-		if legacyUserExists {
-			releasedUserMatchesEmail := false
-			for _, id := range emailKeyedIDs {
-				if id == legacyBootstrapUserID {
-					releasedUserMatchesEmail = true
-					break
-				}
-			}
-			switch {
-			case releasedUserMatchesEmail:
-				// Stable ID and historical email identify the same user.
-			case len(emailKeyedIDs) == 0:
-				// The tenant row was lost but the stable administrator row
-				// survived with a customized email.
-			default:
-				return bootstrapIdentity{}, fmt.Errorf(
-					"starterapp: conflicting released bootstrap administrator %q and email-keyed candidates under missing tenant %q: %v",
-					legacyBootstrapUserID,
-					legacyBootstrapTenantID,
-					emailKeyedIDs,
-				)
-			}
-			return bootstrapIdentity{
-				TenantID: legacyBootstrapTenantID,
-				UserID:   legacyBootstrapUserID,
-			}, nil
-		}
-		switch len(emailKeyedIDs) {
-		case 1:
-			return bootstrapIdentity{
-				TenantID: legacyBootstrapTenantID,
-				UserID:   emailKeyedIDs[0],
-			}, nil
-		case 0:
-			// Both bootstrap rows can be deleted independently while
-			// tenant-owned rows survive. Recreate the released keys so those
-			// rows remain attached instead of selecting fresh-install IDs.
-		default:
+		priorUserID, found, selectErr := selectPriorAdministrator(
+			candidates,
+			legacyUserExists && legacyUserTenant == legacyBootstrapTenantID,
+		)
+		if selectErr != nil {
 			return bootstrapIdentity{}, fmt.Errorf(
-				"starterapp: ambiguous prior email-keyed administrators under missing tenant %q: %v",
+				"starterapp: conflicting released bootstrap administrator under missing tenant %q: %w",
 				legacyBootstrapTenantID,
-				emailKeyedIDs,
+				selectErr,
 			)
 		}
+		if found {
+			return bootstrapIdentity{
+				TenantID: legacyBootstrapTenantID,
+				UserID:   priorUserID,
+			}, nil
+		}
+		// Both bootstrap rows can be deleted independently while tenant-owned
+		// rows survive. Recreate the released keys so those rows remain attached
+		// instead of selecting fresh-install IDs.
 		return bootstrapIdentity{
 			TenantID: legacyBootstrapTenantID,
 			UserID:   legacyBootstrapUserID,
@@ -350,14 +324,27 @@ func resolveBootstrapIdentity(
 	return bootstrapIdentity{TenantID: seed.TenantID, UserID: seed.UserID}, nil
 }
 
-// releasedBootstrapReferencesExist searches every SQLite application table for
-// the exact durable IDs shipped by earlier releases. WithModules tables are
-// intentionally unknown to starterapp, so a fixed list of built-in foreign-key
-// columns would silently orphan downstream data when both identity rows are
-// absent. This scan runs only during the one-time, pre-ledger resolution path.
+// releasedBootstrapReferencesExist searches identity-reference columns in every
+// SQLite application table for the exact durable IDs shipped by earlier
+// releases. WithModules tables are intentionally unknown to starterapp, so the
+// scan recognizes the published tenant_id/user_id/owner_id conventions and
+// declared foreign keys instead of relying on a fixed table list. Arbitrary
+// text columns are excluded: content that merely mentions an old ID is not
+// durable identity evidence. This runs only during pre-ledger resolution.
 func releasedBootstrapReferencesExist(ctx context.Context, db *sql.DB) (bool, error) {
 	quoteIdentifier := func(value string) string {
 		return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+	}
+	referenceValuesForColumn := func(columnName string) []string {
+		switch strings.ToLower(strings.TrimSpace(columnName)) {
+		case "tenant_id", "workspace_id", "organization_id", "organisation_id":
+			return []string{legacyBootstrapTenantID}
+		case "user_id", "owner_id", "author_id", "actor_id", "subject_id",
+			"principal_id", "administrator_id", "created_by", "updated_by", "actor":
+			return []string{legacyBootstrapUserID}
+		default:
+			return nil
+		}
 	}
 
 	rows, err := db.QueryContext(
@@ -388,6 +375,7 @@ func releasedBootstrapReferencesExist(ctx context.Context, db *sql.DB) (bool, er
 	}
 
 	for _, tableName := range tableNames {
+		referenceValues := map[string][]string{}
 		columnRows, err := db.QueryContext(
 			ctx,
 			`PRAGMA table_info(`+quoteIdentifier(tableName)+`)`,
@@ -395,7 +383,6 @@ func releasedBootstrapReferencesExist(ctx context.Context, db *sql.DB) (bool, er
 		if err != nil {
 			return false, err
 		}
-		var columnNames []string
 		for columnRows.Next() {
 			var (
 				columnID    int
@@ -416,7 +403,9 @@ func releasedBootstrapReferencesExist(ctx context.Context, db *sql.DB) (bool, er
 				_ = columnRows.Close()
 				return false, err
 			}
-			columnNames = append(columnNames, columnName)
+			if values := referenceValuesForColumn(columnName); len(values) != 0 {
+				referenceValues[columnName] = values
+			}
 		}
 		if err := columnRows.Err(); err != nil {
 			_ = columnRows.Close()
@@ -425,34 +414,66 @@ func releasedBootstrapReferencesExist(ctx context.Context, db *sql.DB) (bool, er
 		if err := columnRows.Close(); err != nil {
 			return false, err
 		}
-		if len(columnNames) == 0 {
-			continue
+		foreignKeyRows, err := db.QueryContext(
+			ctx,
+			`PRAGMA foreign_key_list(`+quoteIdentifier(tableName)+`)`,
+		)
+		if err != nil {
+			return false, err
+		}
+		for foreignKeyRows.Next() {
+			var (
+				id, sequence              int
+				targetTable, sourceColumn string
+				targetColumn, onUpdate    string
+				onDelete, match           string
+			)
+			if err := foreignKeyRows.Scan(
+				&id,
+				&sequence,
+				&targetTable,
+				&sourceColumn,
+				&targetColumn,
+				&onUpdate,
+				&onDelete,
+				&match,
+			); err != nil {
+				_ = foreignKeyRows.Close()
+				return false, err
+			}
+			switch strings.ToLower(targetTable) {
+			case "tenants":
+				referenceValues[sourceColumn] = []string{legacyBootstrapTenantID}
+			case "users":
+				referenceValues[sourceColumn] = []string{legacyBootstrapUserID}
+			}
+		}
+		if err := foreignKeyRows.Err(); err != nil {
+			_ = foreignKeyRows.Close()
+			return false, err
+		}
+		if err := foreignKeyRows.Close(); err != nil {
+			return false, err
 		}
 
-		predicates := make([]string, 0, len(columnNames)*2)
-		args := make([]any, 0, len(columnNames)*2)
-		for _, columnName := range columnNames {
-			column := quoteIdentifier(columnName)
-			predicates = append(predicates, column+" = ?", column+" = ?")
-			args = append(
-				args,
-				legacyBootstrapTenantID,
-				legacyBootstrapUserID,
-			)
-		}
-		query := `SELECT 1
-			FROM ` + quoteIdentifier(tableName) + `
-			WHERE ` + strings.Join(predicates, " OR ") + `
-			LIMIT 1`
-		var found int
-		err = db.QueryRowContext(ctx, query, args...).Scan(&found)
-		switch {
-		case err == nil:
-			return true, nil
-		case errors.Is(err, sql.ErrNoRows):
-			continue
-		default:
-			return false, err
+		for columnName, values := range referenceValues {
+			for _, value := range values {
+				var found int
+				err = db.QueryRowContext(
+					ctx,
+					`SELECT 1 FROM `+quoteIdentifier(tableName)+
+						` WHERE `+quoteIdentifier(columnName)+` = ? LIMIT 1`,
+					value,
+				).Scan(&found)
+				switch {
+				case err == nil:
+					return true, nil
+				case errors.Is(err, sql.ErrNoRows):
+					continue
+				default:
+					return false, err
+				}
+			}
 		}
 	}
 	return false, nil
