@@ -602,6 +602,44 @@ func migrateBootstrapIdentity(
 		}
 		return nil
 	}
+	revokeCredentialsThroughMigration := func(tenantID, userID, migrationID string) error {
+		for _, credential := range []struct {
+			table     string
+			timeField string
+			label     string
+		}{
+			{table: "auth_sessions", timeField: "issued_at", label: "sessions"},
+			{table: "api_keys", timeField: "created_at", label: "API keys"},
+		} {
+			// Both the v3 ledger and credential stores write UTC time.Time
+			// values through the same SQLite driver, yielding a shared,
+			// lexicographically sortable representation.
+			if _, err := tx.ExecContext(
+				ctx,
+				`UPDATE `+credential.table+`
+				 SET revoked_at = ?
+				 WHERE tenant_id = ?
+				   AND user_id = ?
+				   AND revoked_at IS NULL
+				   AND `+credential.timeField+` <= (
+					 SELECT applied_at
+					 FROM starterapp_migrations
+					 WHERE id = ?
+				   )`,
+				now,
+				tenantID,
+				userID,
+				migrationID,
+			); err != nil {
+				return fmt.Errorf(
+					"starterapp: revoke prior bootstrap identity %s: %w",
+					credential.label,
+					err,
+				)
+			}
+		}
+		return nil
+	}
 
 	var alreadyApplied int
 	if err := tx.QueryRowContext(
@@ -633,10 +671,48 @@ func migrateBootstrapIdentity(
 	}
 	if priorCleanupApplied != 0 {
 		// Early builds carrying v3 normalized these labels and rotated the
-		// public password, but did not revoke API keys. Revoke credentials
-		// fail-closed without replaying label comparisons: a matching legacy
-		// literal may now be an operator's deliberate post-migration value.
-		if err := revokeCredentials(identity.TenantID, identity.UserID); err != nil {
+		// public password, but did not revoke API keys. Do not replay label
+		// comparisons: a matching legacy literal may now be an operator's
+		// deliberate post-migration value.
+		publicPasswordStillActive := false
+		if selectedUserCount != 0 {
+			var selectedPassHash string
+			if err := tx.QueryRowContext(
+				ctx,
+				`SELECT pass_hash FROM users WHERE id = ? AND tenant_id = ?`,
+				identity.UserID,
+				identity.TenantID,
+			).Scan(&selectedPassHash); err != nil {
+				return fmt.Errorf("starterapp: inspect finalized bootstrap password: %w", err)
+			}
+			if hasher.Verify(legacyBootstrapUserPassword, selectedPassHash) == nil {
+				publicPasswordStillActive = true
+				replacementPassHash, err := hasher.Hash(adminPassword)
+				if err != nil {
+					return fmt.Errorf("starterapp: hash finalized bootstrap password: %w", err)
+				}
+				if _, err := tx.ExecContext(
+					ctx,
+					`UPDATE users
+					 SET pass_hash = ?
+					 WHERE id = ? AND tenant_id = ?`,
+					replacementPassHash,
+					identity.UserID,
+					identity.TenantID,
+				); err != nil {
+					return fmt.Errorf("starterapp: rotate finalized bootstrap password: %w", err)
+				}
+			}
+		}
+		if identityIncomplete || publicPasswordStillActive {
+			if err := revokeCredentials(identity.TenantID, identity.UserID); err != nil {
+				return err
+			}
+		} else if err := revokeCredentialsThroughMigration(
+			identity.TenantID,
+			identity.UserID,
+			priorBootstrapIdentityMigrationID,
+		); err != nil {
 			return err
 		}
 		releasedIdentity := bootstrapIdentity{
@@ -644,7 +720,11 @@ func migrateBootstrapIdentity(
 			UserID:   legacyBootstrapUserID,
 		}
 		if identity != releasedIdentity {
-			if err := revokeCredentials(releasedIdentity.TenantID, releasedIdentity.UserID); err != nil {
+			if err := revokeCredentialsThroughMigration(
+				releasedIdentity.TenantID,
+				releasedIdentity.UserID,
+				priorBootstrapIdentityMigrationID,
+			); err != nil {
 				return err
 			}
 		}

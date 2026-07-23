@@ -50,6 +50,11 @@ func resolveSeedParams(cfg *Config) (seed.Params, error) {
 		}
 		password = seed.UserPass
 	}
+	if password == legacyBootstrapUserPassword {
+		return seed.Params{}, fmt.Errorf(
+			"starterapp: seed.admin_password must not use the retired public bootstrap password",
+		)
+	}
 	if len([]byte(password)) > user.MaxPasswordBytes {
 		return seed.Params{}, fmt.Errorf(
 			"starterapp: seed.admin_password must be at most %d UTF-8 bytes",

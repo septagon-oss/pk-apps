@@ -260,25 +260,36 @@ func TestBootstrapMigrationFinalizesPriorCleanupWithoutReplayingLabels(t *testin
 	); err != nil {
 		t.Fatalf("model completed prior cleanup: %v", err)
 	}
-	if _, err := db.ExecContext(
-		ctx,
-		`CREATE TABLE starterapp_migrations (
-			id TEXT PRIMARY KEY,
-			applied_at DATETIME NOT NULL
-		);
-		CREATE TABLE starterapp_bootstrap_identity (
-			id TEXT PRIMARY KEY,
-			tenant_id TEXT NOT NULL,
-			user_id TEXT NOT NULL
-		);
-		INSERT INTO starterapp_migrations (id, applied_at)
-			VALUES ('20260723_bootstrap_labels_v3', CURRENT_TIMESTAMP);
-		INSERT INTO starterapp_bootstrap_identity (id, tenant_id, user_id)
-			VALUES ('active', ?, ?)`,
+	priorAppliedAt := time.Now().UTC()
+	recordPriorBootstrapCleanup(
+		t,
+		db,
 		releasedBootstrapTenantID,
 		releasedBootstrapUserID,
+		priorAppliedAt,
+	)
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO auth_sessions
+		 (id, user_id, tenant_id, issued_at, expires_at, revoked_at)
+		 VALUES ('session_after_v3', ?, ?, ?, ?, NULL)`,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+		priorAppliedAt.Add(time.Second),
+		priorAppliedAt.Add(time.Hour),
 	); err != nil {
-		t.Fatalf("record prior cleanup revision: %v", err)
+		t.Fatalf("record session issued after prior cleanup: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO api_keys
+		 (id, tenant_id, user_id, name, prefix, hash, scopes, last_used_at, revoked_at, expires_at, created_at)
+		 VALUES ('key_after_v3', ?, ?, 'after-v3', 'pk_after_v3', 'hash', 'content:read', NULL, NULL, NULL, ?)`,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		priorAppliedAt.Add(time.Second),
+	); err != nil {
+		t.Fatalf("record API key issued after prior cleanup: %v", err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close prior-cleanup fixture: %v", err)
@@ -331,22 +342,35 @@ func TestBootstrapMigrationFinalizesPriorCleanupWithoutReplayingLabels(t *testin
 	for _, check := range []struct {
 		name  string
 		query string
+		want  int
 	}{
 		{
 			name:  "session",
 			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'session_existing' AND revoked_at IS NOT NULL`,
+			want:  1,
 		},
 		{
 			name:  "API key",
 			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'key_existing' AND revoked_at IS NOT NULL`,
+			want:  1,
+		},
+		{
+			name:  "post-v3 session",
+			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'session_after_v3' AND revoked_at IS NULL`,
+			want:  1,
+		},
+		{
+			name:  "post-v3 API key",
+			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'key_after_v3' AND revoked_at IS NULL`,
+			want:  1,
 		},
 	} {
-		var revoked int
-		if err := app.db.QueryRowContext(ctx, check.query).Scan(&revoked); err != nil {
+		var count int
+		if err := app.db.QueryRowContext(ctx, check.query).Scan(&count); err != nil {
 			t.Fatalf("read prior-cleanup %s: %v", check.name, err)
 		}
-		if revoked != 1 {
-			t.Fatalf("prior-cleanup %s revoked rows = %d, want 1", check.name, revoked)
+		if count != check.want {
+			t.Fatalf("prior-cleanup %s rows = %d, want %d", check.name, count, check.want)
 		}
 	}
 	var currentRevisionCount int
@@ -359,6 +383,134 @@ func TestBootstrapMigrationFinalizesPriorCleanupWithoutReplayingLabels(t *testin
 	}
 	if currentRevisionCount != 1 {
 		t.Fatalf("current cleanup revision count = %d, want 1", currentRevisionCount)
+	}
+}
+
+func TestBootstrapMigrationFinalizesFreshPriorCleanupPreservesCredentials(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	first, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("first BuildApp(): %v", err)
+	}
+	if _, err := first.db.ExecContext(
+		ctx,
+		`UPDATE starterapp_migrations
+		 SET id = ?, applied_at = ?
+		 WHERE id = ?`,
+		priorBootstrapIdentityMigrationID,
+		time.Now().UTC(),
+		bootstrapIdentityMigrationID,
+	); err != nil {
+		t.Fatalf("model fresh v3 migration: %v", err)
+	}
+	session, err := first.authMod.Service().Login(ctx, seed.TenantID, auth.Credentials{
+		Email:    seed.UserEmail,
+		Password: seed.UserPass,
+	})
+	if err != nil {
+		t.Fatalf("create post-v3 session: %v", err)
+	}
+	_, key, err := first.apiKey.Service().Issue(
+		ctx,
+		seed.TenantID,
+		seed.UserID,
+		"post-v3",
+		[]string{"content:read"},
+		0,
+	)
+	if err != nil {
+		t.Fatalf("create post-v3 API key: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first app: %v", err)
+	}
+
+	second, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() after fresh v3 state: %v", err)
+	}
+	defer second.Close()
+	if _, err := second.authMod.Service().ValidateSession(ctx, session.ID); err != nil {
+		t.Fatalf("post-v3 session was revoked: %v", err)
+	}
+	var activeKey int
+	if err := second.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM api_keys WHERE id = ? AND revoked_at IS NULL`,
+		key.ID,
+	).Scan(&activeKey); err != nil {
+		t.Fatalf("read post-v3 API key: %v", err)
+	}
+	if activeKey != 1 {
+		t.Fatalf("post-v3 active API key rows = %d, want 1", activeKey)
+	}
+}
+
+func TestBootstrapMigrationFinalizesPriorCleanupRotatesRetiredPassword(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	cfg.Environment = "production"
+	cfg.Seed.AdminPassword = "current-production-bootstrap-password"
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open prior public-password fixture: %v", err)
+	}
+	recordPriorBootstrapCleanup(
+		t,
+		db,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		time.Now().UTC(),
+	)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close prior public-password fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() with prior public password: %v", err)
+	}
+	defer app.Close()
+
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		cfg.Seed.AdminPassword,
+	); err != nil {
+		t.Fatalf("configured replacement password does not verify: %v", err)
+	}
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		releasedBootstrapUserPassword,
+	); err == nil {
+		t.Fatal("retired public password still verifies after v3 finalization")
+	}
+	for _, check := range []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "session",
+			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'session_existing' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "API key",
+			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'key_existing' AND revoked_at IS NOT NULL`,
+		},
+	} {
+		var revoked int
+		if err := app.db.QueryRowContext(ctx, check.query).Scan(&revoked); err != nil {
+			t.Fatalf("read public-password %s: %v", check.name, err)
+		}
+		if revoked != 1 {
+			t.Fatalf("public-password %s revoked rows = %d, want 1", check.name, revoked)
+		}
 	}
 }
 
@@ -1714,6 +1866,43 @@ func TestBootstrapMigrationRejectsUnrecordedNeutralIDCollision(t *testing.T) {
 	}
 	if ledgerCount != 0 {
 		t.Fatal("failed collision resolution committed a bootstrap identity ledger")
+	}
+}
+
+func recordPriorBootstrapCleanup(
+	t *testing.T,
+	db *sql.DB,
+	tenantID string,
+	userID string,
+	appliedAt time.Time,
+) {
+	t.Helper()
+	if _, err := db.Exec(`
+		CREATE TABLE starterapp_migrations (
+			id TEXT PRIMARY KEY,
+			applied_at DATETIME NOT NULL
+		);
+		CREATE TABLE starterapp_bootstrap_identity (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL
+		)`); err != nil {
+		t.Fatalf("create prior cleanup ledger: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO starterapp_migrations (id, applied_at) VALUES (?, ?)`,
+		priorBootstrapIdentityMigrationID,
+		appliedAt,
+	); err != nil {
+		t.Fatalf("record prior cleanup revision: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO starterapp_bootstrap_identity (id, tenant_id, user_id)
+		 VALUES ('active', ?, ?)`,
+		tenantID,
+		userID,
+	); err != nil {
+		t.Fatalf("record prior cleanup identity: %v", err)
 	}
 }
 
