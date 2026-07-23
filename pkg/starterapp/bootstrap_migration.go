@@ -19,7 +19,7 @@ import (
 // generic local identity was introduced. They are migration input only: new
 // databases and current runtime behavior use the constants in package seed.
 const (
-	bootstrapIdentityMigrationID = "20260723_bootstrap_labels_v3"
+	bootstrapIdentityMigrationID = "20260723_bootstrap_labels_v4"
 
 	legacyBootstrapTenantID     = "tenant_acme"
 	legacyBootstrapTenantSlug   = "acme"
@@ -425,8 +425,8 @@ func releasedBootstrapReferencesExist(ctx context.Context, db *sql.DB) (bool, er
 			var (
 				id, sequence              int
 				targetTable, sourceColumn string
-				targetColumn, onUpdate    string
-				onDelete, match           string
+				targetColumn              sql.NullString
+				onUpdate, onDelete, match string
 			)
 			if err := foreignKeyRows.Scan(
 				&id,

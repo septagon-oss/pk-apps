@@ -228,6 +228,89 @@ func TestBuildAppNeutralizesLegacyBootstrapLabelsAndPreservesDurableIDs(t *testi
 	}
 }
 
+func TestBootstrapMigrationReappliesAfterPriorCleanupRevision(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open prior-cleanup fixture: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`CREATE TABLE starterapp_migrations (
+			id TEXT PRIMARY KEY,
+			applied_at DATETIME NOT NULL
+		);
+		CREATE TABLE starterapp_bootstrap_identity (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL
+		);
+		INSERT INTO starterapp_migrations (id, applied_at)
+			VALUES ('20260723_bootstrap_labels_v3', CURRENT_TIMESTAMP);
+		INSERT INTO starterapp_bootstrap_identity (id, tenant_id, user_id)
+			VALUES ('active', ?, ?)`,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+	); err != nil {
+		t.Fatalf("record prior cleanup revision: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close prior-cleanup fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() after prior cleanup revision: %v", err)
+	}
+	defer app.Close()
+
+	migratedTenant, err := app.tenant.Service().Get(ctx, releasedBootstrapTenantID)
+	if err != nil {
+		t.Fatalf("lookup reprocessed tenant: %v", err)
+	}
+	if migratedTenant.Slug != seed.TenantSlug || migratedTenant.Name != seed.TenantName {
+		t.Fatalf(
+			"reprocessed tenant = slug %q name %q, want slug %q name %q",
+			migratedTenant.Slug,
+			migratedTenant.Name,
+			seed.TenantSlug,
+			seed.TenantName,
+		)
+	}
+	migratedAdmin, err := app.user.Service().Get(
+		ctx,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+	)
+	if err != nil {
+		t.Fatalf("lookup reprocessed administrator: %v", err)
+	}
+	if migratedAdmin.Email != seed.UserEmail ||
+		migratedAdmin.Username != seed.UserName ||
+		migratedAdmin.DisplayName != seed.UserDisplay {
+		t.Fatalf(
+			"reprocessed administrator = email %q username %q display %q",
+			migratedAdmin.Email,
+			migratedAdmin.Username,
+			migratedAdmin.DisplayName,
+		)
+	}
+	var currentRevisionCount int
+	if err := app.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM starterapp_migrations WHERE id = ?`,
+		bootstrapIdentityMigrationID,
+	).Scan(&currentRevisionCount); err != nil {
+		t.Fatalf("read current cleanup revision: %v", err)
+	}
+	if currentRevisionCount != 1 {
+		t.Fatalf("current cleanup revision count = %d, want 1", currentRevisionCount)
+	}
+}
+
 func TestBootstrapMigrationPreservesCustomizedProductionIdentity(t *testing.T) {
 	ctx := context.Background()
 	cfg := freshConfig(t)
@@ -1325,10 +1408,14 @@ func TestBootstrapReferenceScanUsesIdentityColumnsAndHandlesWideTables(t *testin
 	if _, err := db.ExecContext(
 		ctx,
 		`CREATE TABLE extension_notes (id TEXT PRIMARY KEY, body TEXT NOT NULL);
-		 INSERT INTO extension_notes (id, body) VALUES ('note-1', ?)`,
+		 INSERT INTO extension_notes (id, body) VALUES ('note-1', ?);
+		 CREATE TABLE implicit_fk_extension (
+			id TEXT PRIMARY KEY,
+			owner_id TEXT REFERENCES users
+		 )`,
 		releasedBootstrapTenantID,
 	); err != nil {
-		t.Fatalf("create ordinary-text fixture: %v", err)
+		t.Fatalf("create ordinary-text and implicit-FK fixtures: %v", err)
 	}
 	found, err := releasedBootstrapReferencesExist(ctx, db)
 	if err != nil {

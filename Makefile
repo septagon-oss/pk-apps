@@ -8,8 +8,13 @@ GO_WORK := GOWORK=$(abspath $(GOWORK_FILE))
 endif
 GO_ENV ?= $(GO_WORK) GOTMPDIR=$(CURDIR)/.tmp-go-tmp TMPDIR=$(CURDIR)/.tmp-go-tmp
 STATICCHECK_VERSION ?= v0.7.0
-STATICCHECK_BIN := $(CURDIR)/.tmp-tools/staticcheck
+STATICCHECK_BIN := $(CURDIR)/.tmp-tools/staticcheck-$(STATICCHECK_VERSION)
+STATICCHECK ?= $(STATICCHECK_BIN)
 TMPDIRS := .tmp-go-tmp .tmp-tools
+
+ifeq ($(origin STATICCHECK),file)
+STATICCHECK_PREREQ := $(STATICCHECK_BIN)
+endif
 
 .PHONY: test vet staticcheck race verify
 
@@ -17,7 +22,8 @@ $(TMPDIRS):
 	@mkdir -p $@
 
 $(STATICCHECK_BIN): | $(TMPDIRS)
-	$(GO_ENV) GOBIN=$(CURDIR)/.tmp-tools go install honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
+	$(GO_ENV) GOBIN="$(CURDIR)/.tmp-tools" go install honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
+	mv "$(CURDIR)/.tmp-tools/staticcheck" "$@"
 
 test: | $(TMPDIRS)
 	$(GO_ENV) go test ./...
@@ -25,8 +31,13 @@ test: | $(TMPDIRS)
 vet: | $(TMPDIRS)
 	$(GO_ENV) go vet ./...
 
-staticcheck: $(STATICCHECK_BIN) | $(TMPDIRS)
-	$(GO_ENV) GOFLAGS=-buildvcs=false $(STATICCHECK_BIN) ./...
+staticcheck: $(STATICCHECK_PREREQ) | $(TMPDIRS)
+	@packages="$$( $(GO_ENV) GOFLAGS=-buildvcs=false go list ./... )"; \
+	if [[ -z "$$packages" ]]; then \
+		echo "staticcheck: go list returned no packages"; \
+		exit 1; \
+	fi; \
+	$(GO_ENV) GOFLAGS=-buildvcs=false $(STATICCHECK) $$packages
 
 race: | $(TMPDIRS)
 	$(GO_ENV) go test -race -count=1 ./...
