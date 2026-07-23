@@ -20,14 +20,14 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Example boots the full starter: SQLite store, nine modules, seeded demo
-// tenant, HTTP on :8080. This is the entire main function of the platformkit
+// Example boots the full starter: SQLite store, nine modules, local bootstrap,
+// and HTTP on :8080. This is the entire main function of the platformkit
 // front door. (Compile-only: Run serves until the context is canceled.)
 func Example() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	cfg := starterapp.DefaultConfig() // development mode: demo tenant + admin seed
+	cfg := starterapp.DefaultConfig() // development mode: local bootstrap
 	if err := starterapp.Run(ctx, cfg); err != nil {
 		log.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func Example() {
 // ExampleLoadConfig shows the fail-closed contract: asking to load a config
 // file is a deployment signal, so a missing file resolves to the production
 // environment (which refuses to boot without an explicit admin password)
-// rather than silently falling back to the development demo seed.
+// rather than silently falling back to the development bootstrap.
 func ExampleLoadConfig() {
 	dir, err := os.MkdirTemp("", "pk-example")
 	if err != nil {

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
 	pkmodule "github.com/septagon-oss/pk-core/pkg/module"
 	"github.com/septagon-oss/pk-modules/pkg/audit"
 	"github.com/septagon-oss/pk-modules/pkg/portslib"
@@ -95,7 +96,7 @@ func TestWithModulesContributesAModule(t *testing.T) {
 	}
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !strings.Contains(string(b), "widget for tenant_acme/") {
+	if !strings.Contains(string(b), "widget for "+seed.TenantID+"/") {
 		t.Fatalf("authenticated widget body = %q, want it to see the caller's tenant", b)
 	}
 

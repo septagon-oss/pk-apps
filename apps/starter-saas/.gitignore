@@ -1,8 +1,0 @@
-pk.db
-pk.db-journal
-pk.db-shm
-pk.db-wal
-.env
-.env.local
-.tmp-*
-starter-saas

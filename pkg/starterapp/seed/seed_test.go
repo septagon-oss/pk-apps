@@ -62,7 +62,7 @@ func newSeedHarness(t *testing.T) (tenant.TenantService, user.UserService) {
 }
 
 // devSeedParams is the development credential set used across the seed tests:
-// the demo login with password self-repair enabled, mirroring how BuildApp
+// the local login with password self-repair enabled, mirroring how BuildApp
 // resolves params in a development environment.
 func devSeedParams() Params {
 	return Params{AdminEmail: UserEmail, AdminPassword: UserPass, RepairPassword: true}

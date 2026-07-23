@@ -587,10 +587,10 @@ components:
       type: object
       required: [tenant_id, password]
       properties:
-        tenant_id: { type: string, example: tenant_acme }
-        email: { type: string, example: admin@local.test }
+        tenant_id: { type: string, example: tenant_local }
+        email: { type: string, example: operator@local.test }
         username: { type: string, description: Alternative to email. }
-        password: { type: string, example: changeme }
+        password: { type: string, example: local-development-only }
 
     Session:
       type: object

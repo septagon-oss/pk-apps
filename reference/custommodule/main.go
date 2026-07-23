@@ -2,8 +2,8 @@
 // Per: ADR-0017.
 // Discipline: C-14.
 
-// main.go is the canonical example of extending the batteries-included starter
-// with your OWN module. It boots the full nine-module app via starterapp.Run
+// main.go is the canonical reference for extending the batteries-included
+// starter with your OWN module. It boots the full nine-module app via starterapp.Run
 // and contributes one custom, tenant-scoped "widgets" module through
 // starterapp.WithModules. The custom routes are mounted on the same mux as the
 // built-ins, so they inherit the identity middleware, the anonymous-mutation
@@ -13,7 +13,7 @@
 // Run it, then:
 //
 //	SID=$(curl -s -X POST localhost:8080/api/v1/auth/sessions \
-//	  -d '{"tenant_id":"tenant_acme","email":"admin@local.test","password":"changeme"}' | jq -r .id)
+//	  -d '{"tenant_id":"tenant_local","email":"operator@local.test","password":"local-development-only"}' | jq -r .id)
 //	curl -s -X POST localhost:8080/api/v1/widgets -H "Authorization: Bearer $SID" -d '{"name":"gadget"}'
 //	curl -s        localhost:8080/api/v1/widgets -H "Authorization: Bearer $SID"
 //
@@ -140,7 +140,7 @@ func (h *widgetHandler) RegisterRoutes(mux *http.ServeMux) {
 // returns how many widgets a tenant has, no bearer required. The tenant comes
 // from the path, not a credential — the public equivalent of a status page.
 //
-//	curl -s localhost:8080/w/tenant_acme/count
+//	curl -s localhost:8080/w/tenant_local/count
 func (h *widgetHandler) RegisterPublicRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/w/", func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/w/"), "/"), "/")

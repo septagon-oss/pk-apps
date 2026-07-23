@@ -1,8 +1,7 @@
-// Package seed installs the first-boot tenant and admin user used by the
-// starter-saas demo. It is idempotent and self-repairing: Run independently
-// ensures BOTH the demo tenant AND the admin user (with the advertised
-// password) exist, regardless of any partial prior state, and is safe to call
-// on every boot.
+// Package seed installs the first-boot tenant and administrator used by the
+// canonical starter. It is idempotent: Run independently ensures both records
+// exist regardless of partial prior state. Password repair is explicitly
+// limited to local development.
 //
 // seed.go owns the first-boot seeding routine. The contract is intentionally
 // narrow — Run only requires the public TenantService and UserService ports,
@@ -33,14 +32,14 @@ import (
 // Default seed values. Exported so tests and docs can reference the same
 // strings the runtime prints in its startup banner.
 const (
-	TenantID    = "tenant_acme"
-	TenantSlug  = "acme"
-	TenantName  = "Acme Inc"
-	UserID      = "user_admin"
-	UserEmail   = "admin@local.test"
-	UserName    = "admin"
-	UserDisplay = "Demo Admin"
-	UserPass    = "changeme"
+	TenantID    = "tenant_local"
+	TenantSlug  = "local"
+	TenantName  = "Local Workspace"
+	UserID      = "user_operator"
+	UserEmail   = "operator@local.test"
+	UserName    = "operator"
+	UserDisplay = "Local Administrator"
+	UserPass    = "local-development-only"
 )
 
 // Params configures the first-boot seed. AdminEmail/AdminPassword set the
@@ -48,7 +47,7 @@ const (
 // dangerous behavior: whether an EXISTING admin whose password no longer
 // verifies gets reset back to AdminPassword. It must be true only in
 // development — leaving it false in production is what removes the v0.1.0
-// "password re-asserts to changeme on every boot" backdoor.
+// "password re-asserts on every boot" backdoor.
 type Params struct {
 	AdminEmail     string
 	AdminPassword  string
@@ -96,9 +95,9 @@ func Run(ctx context.Context, tenantSvc tenant.TenantService, userSvc user.UserS
 	return res, nil
 }
 
-// ensureTenant creates the demo tenant if it is not already present, keyed on
-// its stable slug. An existing tenant is left untouched. It reports whether it
-// created the tenant.
+// ensureTenant creates the bootstrap tenant if it is not already present,
+// keyed on its stable slug. An existing tenant is left untouched. It reports
+// whether it created the tenant.
 func ensureTenant(ctx context.Context, tenantSvc tenant.TenantService) (bool, error) {
 	existing, err := tenantSvc.GetBySlug(ctx, TenantSlug)
 	if err == nil && existing != nil {

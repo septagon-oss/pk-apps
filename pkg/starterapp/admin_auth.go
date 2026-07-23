@@ -180,15 +180,15 @@ var adminLoginTemplate = template.Must(template.New("admin-login").Parse(`<!doct
     background: #fff1ee;
     font-size: 13px;
   }
-  .demo {
+  .development-note {
     margin: 0 0 22px;
     padding: 13px 15px;
     border: 1px solid #cad79c;
     background: #f6fadf;
     font-size: 12px;
   }
-  .demo strong { display: block; margin-bottom: 3px; }
-  .demo code { font-family: var(--mono); }
+  .development-note strong { display: block; margin-bottom: 3px; }
+  .development-note code { font-family: var(--mono); }
   .field { margin-top: 19px; }
   label {
     display: flex;
@@ -276,9 +276,9 @@ var adminLoginTemplate = template.Must(template.New("admin-login").Parse(`<!doct
       </header>
       {{if .Error}}<div class="notice" role="alert" aria-live="assertive">{{.Error}}</div>{{end}}
       {{if .Development}}
-      <aside class="demo">
+      <aside class="development-note">
         <strong>Development workspace</strong>
-        Tenant <code>{{.DemoTenant}}</code> and email <code>{{.DemoEmail}}</code> are prefilled. Use the demo password printed in the terminal.
+        Tenant <code>{{.BootstrapTenant}}</code> and email <code>{{.BootstrapEmail}}</code> are prefilled. Use the local password printed in the terminal.
       </aside>
       {{end}}
       <form method="post" action="/admin/login">
@@ -367,14 +367,14 @@ func (a *App) registerAdminAuth(mux *http.ServeMux) {
 }
 
 type adminLoginView struct {
-	Error       string
-	TenantID    string
-	Email       string
-	AppName     string
-	Environment string
-	Development bool
-	DemoTenant  string
-	DemoEmail   string
+	Error           string
+	TenantID        string
+	Email           string
+	AppName         string
+	Environment     string
+	Development     bool
+	BootstrapTenant string
+	BootstrapEmail  string
 }
 
 func (a *App) renderAdminLogin(w http.ResponseWriter, tenantID, email, errMsg string, status int) {
@@ -385,14 +385,14 @@ func (a *App) renderAdminLogin(w http.ResponseWriter, tenantID, email, errMsg st
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	_ = adminLoginTemplate.Execute(w, adminLoginView{
-		Error:       errMsg,
-		TenantID:    tenantID,
-		Email:       email,
-		AppName:     a.appName,
-		Environment: a.environment,
-		Development: a.environment == "development",
-		DemoTenant:  seed.TenantID,
-		DemoEmail:   a.seedEmail,
+		Error:           errMsg,
+		TenantID:        tenantID,
+		Email:           email,
+		AppName:         a.appName,
+		Environment:     a.environment,
+		Development:     a.environment == "development",
+		BootstrapTenant: seed.TenantID,
+		BootstrapEmail:  a.seedEmail,
 	})
 }
 

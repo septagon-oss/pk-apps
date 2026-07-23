@@ -93,7 +93,7 @@ func TestComposeAllNineModulesIntoCatalog(t *testing.T) {
 }
 
 // TestSeedCreatesTenantAndUser checks that the first-boot seed populates the
-// demo tenant and admin user, and that running BuildApp a second time against
+// local tenant and administrator, and that running BuildApp a second time against
 // the same DSN does not error out (i.e. seed.Run is idempotent).
 func TestSeedCreatesTenantAndUser(t *testing.T) {
 	t.Parallel()

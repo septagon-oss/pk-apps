@@ -4,18 +4,16 @@
 // content, notification, admin) against a single SQLite database and exposes
 // them through one http.Handler.
 //
-// This package exists so the application's construction graph has exactly ONE
-// home. Both pk-apps's own `apps/starter-saas` binary and the public front-door
-// repo (github.com/septagon-oss/platformkit) are thin ~10-line main() wrappers
-// over BuildApp + App.Mux + App.Serve here. There is no logic duplication
-// between the two runnable entry points: change the graph once, here, and every
-// wrapper inherits it.
+// This package exists so the application's construction graph has exactly one
+// home. The public front-door repository (github.com/septagon-oss/platformkit)
+// is the supported runnable wrapper. Downstream products import this package
+// and extend the same graph through WithModules.
 //
 // app.go owns the application assembly graph. BuildApp opens ONE shared *sql.DB
 // over the configured SQLite file, then constructs the admin shell and every
 // business module against that single connection pool, the audit emitter
-// forwarded into security-sensitive modules, the seed routine that populates
-// the demo tenant + admin user, the pk-core module catalog that proves the
+// forwarded into security-sensitive modules, the seed routine that installs
+// the local tenant + administrator, the pk-core module catalog that proves the
 // composition is valid, and the pk-runtime host that surfaces /live and /ready.
 //
 // Why one shared *sql.DB: SQLite is a single-writer embedded engine. Giving
@@ -69,7 +67,7 @@ import (
 
 // BundleName is the catalog bundle ID for the starter monolith. Exported so
 // catalog assertions in tests and front-door wrappers remain stable.
-const BundleName = "platformkit.starter-saas"
+const BundleName = "platformkit.starter"
 
 // App holds every constructed module plus the composed catalog so callers
 // (binaries and tests) can introspect the runtime without re-running boot.
@@ -296,12 +294,13 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	// typically sits behind a TLS-terminating proxy that may not forward the
 	// scheme, in which case the session cookie would otherwise ship without
 	// Secure and be transmittable in cleartext. Development stays scheme-derived
-	// so the local http demo works.
+	// so the local development server works.
 	if cfg.Environment != "development" {
 		cookies.Configure(cookies.Settings{ForceSecure: true})
 	}
 
-	// Seed the demo tenant + admin user. Safe to call on every boot.
+	// Install the local/bootstrap tenant and administrator. Safe to call on
+	// every boot; production never repairs an existing password.
 	seedParams, err := resolveSeedParams(cfg)
 	if err != nil {
 		return nil, err

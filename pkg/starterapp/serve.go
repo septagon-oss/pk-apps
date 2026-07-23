@@ -2,8 +2,7 @@
 // runnable wrapper. Main wraps the binary differently (config path, signals),
 // but the serving semantics — build the mux, print the operator banner, listen,
 // and shut down cleanly on SIGINT/SIGTERM — are identical everywhere and live
-// here so there is no duplication between pk-apps's own binary and the
-// front-door repo's main().
+// here so downstream wrappers do not duplicate lifecycle behavior.
 //
 // Run is the one call a ~10-line main() needs: give it a context and a Config
 // and it builds the App, serves until the context is cancelled, and releases
@@ -65,7 +64,7 @@ func Run(ctx context.Context, cfg *Config, opts ...Option) error {
 
 	select {
 	case <-ctx.Done():
-		log.Println("starter-saas: shutdown signal received")
+		log.Println("platformkit: shutdown signal received")
 	case err := <-serverErr:
 		if err != nil {
 			return fmt.Errorf("listen: %w", err)
@@ -76,9 +75,9 @@ func Run(ctx context.Context, cfg *Config, opts ...Option) error {
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.HTTP.ShutdownTimeout)
 	defer cancelShutdown()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("starter-saas: graceful shutdown failed: %v", err)
+		log.Printf("platformkit: graceful shutdown failed: %v", err)
 	} else {
-		log.Println("starter-saas: server stopped cleanly")
+		log.Println("platformkit: server stopped cleanly")
 	}
 	return nil
 }
@@ -89,13 +88,13 @@ func printBanner(cfg *Config, app *App) {
 	bar := "============================================================"
 	baseURL := displayURL(cfg.HTTP.Addr)
 	fmt.Println(bar)
-	fmt.Println(" starter-saas — PlatformKit OSS monolith")
+	fmt.Println(" PlatformKit OSS")
 	fmt.Printf("  listening:    %s\n", baseURL)
 	fmt.Printf("  admin UI:     %s%s\n", baseURL, app.adminBasePath)
 	fmt.Printf("  health:       %s/healthz\n", baseURL)
 	fmt.Printf("  OpenAPI:      %s/openapi/extensions.json\n", baseURL)
 	if cfg.Environment == "development" {
-		fmt.Printf("  demo login:   %s / %s\n", app.seedEmail, app.seedPassword)
+		fmt.Printf("  local login:  %s / %s\n", app.seedEmail, app.seedPassword)
 	} else {
 		fmt.Println("  admin login:  configured seed account (password is never printed)")
 	}
@@ -125,7 +124,7 @@ func displayURL(addr string) string {
 }
 
 // printDevelopmentWarning emits a loud, unmissable notice when the app runs in
-// the development environment. Development mode seeds a well-known admin
+// the development environment. Development mode seeds a well-known local
 // password and RE-ASSERTS it on every boot (seed.Params.RepairPassword) — the
 // exact v0.1.0 behavior that is dangerous if exposed. Making it noisy removes
 // the "silent" failure mode: an operator who deploys without declaring
@@ -136,9 +135,9 @@ func printDevelopmentWarning(cfg *Config) {
 	}
 	fmt.Println()
 	fmt.Println("  ⚠  DEVELOPMENT MODE — NOT SAFE TO EXPOSE")
-	fmt.Println("     • the admin password is a built-in demo default and is")
+	fmt.Println("     • the local administrator password is built in and is")
 	fmt.Println("       RE-ASSERTED on every boot (a changed password reverts).")
-	fmt.Println("     • a demo tenant + admin user are auto-seeded.")
+	fmt.Println("     • a local tenant + administrator are auto-seeded.")
 	fmt.Println("     For any real or network-exposed deployment set")
 	fmt.Println("     environment=production and seed.admin_password in config.yaml.")
 	fmt.Println()

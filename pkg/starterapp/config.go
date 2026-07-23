@@ -58,10 +58,10 @@ type CacheConfig struct {
 	Provider string
 }
 
-// SeedConfig models the seed: block — the first-boot admin credentials. In a
-// development environment these default to the demo login when unset. Outside
-// development, admin_password is REQUIRED (BuildApp refuses to boot without it)
-// so the starter never ships a hardcoded, re-asserted default password.
+// SeedConfig models the seed: block — the first-boot administrator
+// credentials. Development has an explicitly local bootstrap identity.
+// Outside development, admin_password is REQUIRED (BuildApp refuses to boot
+// without it), so deployed environments never inherit the local credential.
 type SeedConfig struct {
 	AdminEmail    string
 	AdminPassword string
@@ -71,7 +71,7 @@ type SeedConfig struct {
 // complete, bootable config on its own when no config.yaml is present.
 func DefaultConfig() *Config {
 	return &Config{
-		AppName:     "starter-saas",
+		AppName:     "platformkit",
 		AppVersion:  "0.4.0",
 		Environment: "development",
 		HTTP: HTTPConfig{
@@ -100,11 +100,11 @@ func DefaultConfig() *Config {
 //
 // Security note: when a config file IS present, an omitted `environment:` key
 // defaults to "production", NOT to the development default. Writing a config
-// file signals a real deployment, and the development default silently enables
-// a re-asserted demo password — so an operator who provides a config but
+// file signals a real deployment, and the development default enables a
+// re-asserted local password — so an operator who provides a config but
 // forgets to declare the environment fails closed (production requires
-// seed.admin_password) rather than silently running the demo credential. The
-// zero-config demo path (DefaultConfig with no file) stays development.
+// seed.admin_password) rather than silently running the local credential. The
+// zero-config path (DefaultConfig with no file) stays development.
 func LoadConfig(path string) (*Config, error) {
 	cfg := DefaultConfig()
 
@@ -112,11 +112,11 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			// A caller invoking LoadConfig is declaring "I expect configuration."
-			// A MISSING file is therefore a deployment signal, not the demo, and
+			// A MISSING file is therefore a deployment signal, not local mode, and
 			// must fail closed: production requires seed.admin_password, so a
 			// misconfigured deployment (wrong CWD, unmounted volume, typo'd path)
-			// refuses to boot rather than silently running the re-asserted demo
-			// credential. The zero-config demo path is DefaultConfig() (used by
+			// refuses to boot rather than silently running the re-asserted local
+			// credential. The zero-config path is DefaultConfig() (used by
 			// the front door), which is development on purpose.
 			cfg.Environment = "production"
 			return cfg, nil

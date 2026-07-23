@@ -19,10 +19,10 @@ import (
 )
 
 // resolveSeedParams derives the seed parameters from configuration. In a
-// development environment it falls back to the demo login and enables password
-// self-repair. In any other environment seed.admin_password is REQUIRED and the
-// password is never re-asserted, so an operator's changed credential survives a
-// restart.
+// development environment it falls back to the local bootstrap identity and
+// enables password self-repair. In any other environment seed.admin_password
+// is REQUIRED and the password is never re-asserted, so an operator's changed
+// credential survives a restart.
 func resolveSeedParams(cfg *Config) (seed.Params, error) {
 	email := cfg.Seed.AdminEmail
 	if email == "" {
@@ -34,7 +34,7 @@ func resolveSeedParams(cfg *Config) (seed.Params, error) {
 		if !dev {
 			return seed.Params{}, fmt.Errorf(
 				"starterapp: seed.admin_password is required when environment is %q "+
-					"(only \"development\" may use the built-in demo password)", cfg.Environment)
+					"(only \"development\" may use the local bootstrap password)", cfg.Environment)
 		}
 		password = seed.UserPass
 	}
@@ -46,7 +46,7 @@ func resolveSeedParams(cfg *Config) (seed.Params, error) {
 }
 
 // seedBannerCredential returns what the development-only startup banner may
-// show for the demo login. Outside development BOTH fields are redacted; the
+// show for the local login. Outside development both fields are redacted; the
 // public root page never renders either value.
 func seedBannerCredential(cfg *Config, params seed.Params) (email, password string) {
 	if cfg.Environment == "development" {

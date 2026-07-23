@@ -36,7 +36,7 @@ import (
 )
 
 // TestResolveSeedParamsFailsClosedOutsideDevelopment covers the composition rule
-// the review found untested: development repairs the demo password, but any
+// the review found untested: development repairs the local password, but any
 // other environment REQUIRES seed.admin_password and never repairs.
 func TestResolveSeedParamsFailsClosedOutsideDevelopment(t *testing.T) {
 	t.Parallel()
@@ -47,7 +47,7 @@ func TestResolveSeedParamsFailsClosedOutsideDevelopment(t *testing.T) {
 		t.Fatalf("development resolveSeedParams: %v", err)
 	}
 	if !p.RepairPassword || p.AdminPassword != seed.UserPass {
-		t.Fatalf("development must repair the demo password, got %+v", p)
+		t.Fatalf("development must repair the local password, got %+v", p)
 	}
 
 	// Non-development with no password → error (fail closed).
@@ -69,8 +69,8 @@ func TestResolveSeedParamsFailsClosedOutsideDevelopment(t *testing.T) {
 
 // TestLoadConfigOmittedEnvironmentFailsClosed proves the fail-open foot-gun is
 // closed: a config file that omits environment defaults to production (not the
-// development demo), so a real deployment that forgets to declare it fails
-// closed instead of silently running the re-asserted demo password.
+// local development), so a real deployment that forgets to declare it fails
+// closed instead of silently running the re-asserted local password.
 func TestLoadConfigOmittedEnvironmentFailsClosed(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -87,7 +87,7 @@ func TestLoadConfigOmittedEnvironmentFailsClosed(t *testing.T) {
 		t.Fatalf("config omitting environment must default to production, got %q", cfg.Environment)
 	}
 
-	// A missing file is the zero-config demo path and stays development.
+	// A missing requested config fails closed to production.
 	cfg2, err := LoadConfig(filepath.Join(dir, "does-not-exist.yaml"))
 	if err != nil {
 		t.Fatalf("LoadConfig(missing): %v", err)
@@ -332,7 +332,7 @@ func TestAdminLoginIsResponsiveAccessibleAndDoesNotExposePassword(t *testing.T) 
 	post := httptest.NewRequest(
 		http.MethodPost,
 		adminLoginPath,
-		strings.NewReader("tenant_id=tenant_acme&email=remember%40example.test&password=wrong"),
+		strings.NewReader("tenant_id="+seed.TenantID+"&email=remember%40example.test&password=wrong"),
 	)
 	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	failed := httptest.NewRecorder()
@@ -352,7 +352,7 @@ func TestAdminLoginIsResponsiveAccessibleAndDoesNotExposePassword(t *testing.T) 
 
 // TestSpoofedBodyTenantIsIgnored is the reviewer's headline gap: the "body
 // tenant_id is ignored" property was unguarded. It logs in as the seeded admin
-// (tenant_acme) and POSTs content whose body claims a DIFFERENT tenant; the
+// and POSTs content whose body claims a different tenant; the
 // created row must land in the caller's tenant, and nothing must appear in the
 // spoofed tenant.
 func TestSpoofedBodyTenantIsIgnored(t *testing.T) {
