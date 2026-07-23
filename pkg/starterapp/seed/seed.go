@@ -24,9 +24,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/septagon-oss/pk-modules/pkg/tenant"
 	"github.com/septagon-oss/pk-modules/pkg/user"
+	userstore "github.com/septagon-oss/pk-modules/pkg/user/store"
 )
 
 // Default seed values. Exported so tests and docs can reference the same
@@ -118,22 +120,35 @@ func ensureTenant(ctx context.Context, tenantSvc tenant.TenantService, tenantID 
 	if err == nil && existing != nil {
 		return false, nil
 	}
+	if err != nil && !errors.Is(err, tenant.ErrNotFound) {
+		return false, fmt.Errorf("seed: inspect bootstrap tenant %q: %w", tenantID, err)
+	}
 
-	existing, err = tenantSvc.GetBySlug(ctx, TenantSlug)
-	if err == nil && existing != nil {
-		if existing.ID != tenantID {
-			return false, fmt.Errorf(
-				"seed: bootstrap slug %q belongs to tenant %q, not selected durable tenant %q",
-				TenantSlug,
-				existing.ID,
-				tenantID,
-			)
+	slug := TenantSlug
+	for suffix := 0; ; suffix++ {
+		existing, err = tenantSvc.GetBySlug(ctx, slug)
+		switch {
+		case err == nil && existing != nil && existing.ID == tenantID:
+			return false, nil
+		case err == nil && existing != nil:
+			if suffix == 0 {
+				slug = "platformkit-local"
+				continue
+			}
+			slug = fmt.Sprintf("platformkit-local-%d", suffix+1)
+			continue
+		case errors.Is(err, tenant.ErrNotFound):
+			// The candidate is available.
+		case err != nil:
+			return false, fmt.Errorf("seed: inspect bootstrap slug %q: %w", slug, err)
+		default:
+			return false, fmt.Errorf("seed: bootstrap slug lookup %q returned no tenant and no error", slug)
 		}
-		return false, nil
+		break
 	}
 	t := &tenant.Tenant{
 		ID:   tenantID,
-		Slug: TenantSlug,
+		Slug: slug,
 		Name: TenantName,
 	}
 	if err := tenantSvc.Create(ctx, t); err != nil {
@@ -167,12 +182,23 @@ func ensureAdminUser(
 		}
 		return false, nil
 	}
+	if err != nil && !errors.Is(err, userstore.ErrNotFound) {
+		return false, fmt.Errorf("seed: inspect bootstrap administrator %q: %w", userID, err)
+	}
 
+	email, err := availableAdminEmail(ctx, userSvc, tenantID, userID, params.AdminEmail)
+	if err != nil {
+		return false, err
+	}
+	username, err := availableAdminUsername(ctx, userSvc, tenantID, userID)
+	if err != nil {
+		return false, err
+	}
 	u := &user.User{
 		ID:          userID,
 		TenantID:    tenantID,
-		Email:       params.AdminEmail,
-		Username:    UserName,
+		Email:       email,
+		Username:    username,
 		DisplayName: UserDisplay,
 		Active:      true,
 	}
@@ -183,4 +209,68 @@ func ensureAdminUser(
 		return false, fmt.Errorf("seed: set admin password: %w", err)
 	}
 	return true, nil
+}
+
+func availableAdminEmail(
+	ctx context.Context,
+	userSvc user.UserService,
+	tenantID string,
+	userID string,
+	preferred string,
+) (string, error) {
+	at := strings.LastIndex(preferred, "@")
+	if at <= 0 || at == len(preferred)-1 {
+		return "", fmt.Errorf("seed: configured admin email %q is invalid", preferred)
+	}
+	local, domain := preferred[:at], preferred[at+1:]
+	candidate := preferred
+	for suffix := 0; ; suffix++ {
+		existing, err := userSvc.GetByEmail(ctx, tenantID, candidate)
+		switch {
+		case err == nil && existing != nil && existing.ID == userID:
+			return candidate, nil
+		case err == nil && existing != nil:
+			if suffix == 0 {
+				candidate = local + "+platformkit@" + domain
+				continue
+			}
+			candidate = fmt.Sprintf("%s+platformkit-%d@%s", local, suffix+1, domain)
+			continue
+		case errors.Is(err, userstore.ErrNotFound):
+			return candidate, nil
+		case err != nil:
+			return "", fmt.Errorf("seed: inspect bootstrap email %q: %w", candidate, err)
+		default:
+			return "", fmt.Errorf("seed: bootstrap email lookup %q returned no user and no error", candidate)
+		}
+	}
+}
+
+func availableAdminUsername(
+	ctx context.Context,
+	userSvc user.UserService,
+	tenantID string,
+	userID string,
+) (string, error) {
+	candidate := UserName
+	for suffix := 0; ; suffix++ {
+		existing, err := userSvc.GetByUsername(ctx, tenantID, candidate)
+		switch {
+		case err == nil && existing != nil && existing.ID == userID:
+			return candidate, nil
+		case err == nil && existing != nil:
+			if suffix == 0 {
+				candidate = "platformkit-operator"
+				continue
+			}
+			candidate = fmt.Sprintf("platformkit-operator-%d", suffix+1)
+			continue
+		case errors.Is(err, userstore.ErrNotFound):
+			return candidate, nil
+		case err != nil:
+			return "", fmt.Errorf("seed: inspect bootstrap username %q: %w", candidate, err)
+		default:
+			return "", fmt.Errorf("seed: bootstrap username lookup %q returned no user and no error", candidate)
+		}
+	}
 }

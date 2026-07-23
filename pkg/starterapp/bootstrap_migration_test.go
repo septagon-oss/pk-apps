@@ -576,6 +576,9 @@ func TestBootstrapMigrationChoosesNonconflictingNeutralLabels(t *testing.T) {
 	ctx := context.Background()
 	cfg := freshConfig(t)
 	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+	cfg.Environment = "production"
+	cfg.Seed.AdminEmail = seed.UserEmail
+	cfg.Seed.AdminPassword = "production-bootstrap-password"
 
 	hasher, err := passhash.NewBcrypt(passhash.MinCost)
 	if err != nil {
@@ -648,12 +651,12 @@ func TestBootstrapMigrationChoosesNonconflictingNeutralLabels(t *testing.T) {
 	}
 	if _, err := app.authMod.Service().Login(ctx, releasedBootstrapTenantID, auth.Credentials{
 		Email:    migratedAdmin.Email,
-		Password: seed.UserPass,
+		Password: cfg.Seed.AdminPassword,
 	}); err != nil {
 		t.Fatalf("collision-safe administrator login: %v", err)
 	}
 	if app.seedEmail != migratedAdmin.Email {
-		t.Fatalf("development banner email = %q, want %q", app.seedEmail, migratedAdmin.Email)
+		t.Fatalf("operator-facing banner email = %q, want %q", app.seedEmail, migratedAdmin.Email)
 	}
 
 	ordinary, err := app.user.Service().Get(ctx, releasedBootstrapTenantID, "existing_operator")
@@ -662,6 +665,261 @@ func TestBootstrapMigrationChoosesNonconflictingNeutralLabels(t *testing.T) {
 	}
 	if ordinary.Email != seed.UserEmail || ordinary.Username != seed.UserName {
 		t.Fatalf("existing operator labels changed to email=%q username=%q", ordinary.Email, ordinary.Username)
+	}
+}
+
+func TestBootstrapMigrationRepairsMissingReleasedAdministrator(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	hasher, err := passhash.NewBcrypt(passhash.MinCost)
+	if err != nil {
+		t.Fatalf("create missing-administrator password hasher: %v", err)
+	}
+	ordinaryPassword := "ordinary-user-password"
+	ordinaryHash, err := hasher.Hash(ordinaryPassword)
+	if err != nil {
+		t.Fatalf("hash missing-administrator collision password: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open missing-administrator fixture: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`DELETE FROM users WHERE id = ? AND tenant_id = ?`,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+	); err != nil {
+		t.Fatalf("delete released administrator: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO users
+		 (id, tenant_id, email, username, pass_hash, display_name, active, created_at, updated_at)
+		 VALUES ('ordinary_operator', ?, ?, ?, ?, 'Ordinary Operator', 1, ?, ?)`,
+		releasedBootstrapTenantID,
+		seed.UserEmail,
+		seed.UserName,
+		ordinaryHash,
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("insert ordinary label owner: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close missing-administrator fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() missing released administrator: %v", err)
+	}
+	defer app.Close()
+
+	if app.adminSubject != releasedBootstrapUserID {
+		t.Fatalf("adminSubject = %q, want repaired released ID %q", app.adminSubject, releasedBootstrapUserID)
+	}
+	repaired, err := app.user.Service().Get(
+		ctx,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+	)
+	if err != nil {
+		t.Fatalf("lookup repaired released administrator: %v", err)
+	}
+	if repaired.Email != "operator+platformkit@local.test" ||
+		repaired.Username != "platformkit-operator" {
+		t.Fatalf(
+			"repaired administrator labels = email %q username %q",
+			repaired.Email,
+			repaired.Username,
+		)
+	}
+	if _, err := app.authMod.Service().Login(ctx, releasedBootstrapTenantID, auth.Credentials{
+		Email:    repaired.Email,
+		Password: seed.UserPass,
+	}); err != nil {
+		t.Fatalf("repaired released administrator login: %v", err)
+	}
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		releasedBootstrapTenantID,
+		"ordinary_operator",
+		ordinaryPassword,
+	); err != nil {
+		t.Fatalf("ordinary label owner password changed: %v", err)
+	}
+	if app.seedEmail != repaired.Email {
+		t.Fatalf("development banner email = %q, want repaired email %q", app.seedEmail, repaired.Email)
+	}
+
+	var extensionOwner string
+	if err := app.db.QueryRowContext(
+		ctx,
+		`SELECT owner_id FROM extension_assets WHERE id = 'asset_existing'`,
+	).Scan(&extensionOwner); err != nil {
+		t.Fatalf("read contributed-module owner: %v", err)
+	}
+	if extensionOwner != releasedBootstrapUserID {
+		t.Fatalf("contributed-module owner = %q, want repaired ID %q", extensionOwner, releasedBootstrapUserID)
+	}
+
+	for _, check := range []struct {
+		name  string
+		query string
+	}{
+		{"session", `SELECT COUNT(*) FROM auth_sessions WHERE id = 'session_existing' AND revoked_at IS NOT NULL`},
+		{"API key", `SELECT COUNT(*) FROM api_keys WHERE id = 'key_existing' AND revoked_at IS NOT NULL`},
+	} {
+		var revoked int
+		if err := app.db.QueryRowContext(ctx, check.query).Scan(&revoked); err != nil {
+			t.Fatalf("inspect repaired administrator %s revocation: %v", check.name, err)
+		}
+		if revoked != 1 {
+			t.Fatalf("repaired administrator %s revoked rows = %d, want 1", check.name, revoked)
+		}
+	}
+}
+
+func TestBootstrapMigrationRepairsMissingReleasedTenant(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open missing-tenant fixture: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`DELETE FROM tenants WHERE id = ?`,
+		releasedBootstrapTenantID,
+	); err != nil {
+		t.Fatalf("delete released tenant: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close missing-tenant fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() missing released tenant: %v", err)
+	}
+	defer app.Close()
+
+	repaired, err := app.tenant.Service().Get(ctx, releasedBootstrapTenantID)
+	if err != nil {
+		t.Fatalf("lookup repaired released tenant: %v", err)
+	}
+	if repaired.Slug != seed.TenantSlug || repaired.Name != seed.TenantName {
+		t.Fatalf("repaired tenant = slug %q name %q", repaired.Slug, repaired.Name)
+	}
+	if app.seedTenantID != releasedBootstrapTenantID ||
+		app.adminSubject != releasedBootstrapUserID {
+		t.Fatalf(
+			"repaired identity = tenant %q user %q",
+			app.seedTenantID,
+			app.adminSubject,
+		)
+	}
+	assertDurableBootstrapReferencesPreserved(t, app.db, 1)
+}
+
+func TestBootstrapMigrationRejectsUnrecordedNeutralIDCollision(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+
+	hasher, err := passhash.NewBcrypt(passhash.MinCost)
+	if err != nil {
+		t.Fatalf("create neutral-ID collision password hasher: %v", err)
+	}
+	privatePassword := "customer-private-password"
+	privateHash, err := hasher.Hash(privatePassword)
+	if err != nil {
+		t.Fatalf("hash neutral-ID collision password: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open neutral-ID collision fixture: %v", err)
+	}
+	if _, err := tenantsqlite.New(db); err != nil {
+		t.Fatalf("initialize neutral-ID tenant store: %v", err)
+	}
+	if _, err := usersqlite.New(db); err != nil {
+		t.Fatalf("initialize neutral-ID user store: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO tenants (id, slug, name, created_at, updated_at)
+		 VALUES (?, 'customer-local', 'Customer Tenant', ?, ?)`,
+		seed.TenantID,
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("insert neutral-ID tenant collision: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO users
+		 (id, tenant_id, email, username, pass_hash, display_name, active, created_at, updated_at)
+		 VALUES (?, ?, 'victim@customer.test', 'victim', ?, 'Victim User', 1, ?, ?)`,
+		seed.UserID,
+		seed.TenantID,
+		privateHash,
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("insert neutral-ID user collision: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close neutral-ID collision fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if app != nil {
+		_ = app.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "unrecorded bootstrap ID collision") {
+		t.Fatalf("BuildApp() neutral-ID collision error = %v", err)
+	}
+
+	db, err = sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("reopen neutral-ID collision fixture: %v", err)
+	}
+	defer db.Close()
+	var storedHash string
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT pass_hash FROM users WHERE id = ? AND tenant_id = ?`,
+		seed.UserID,
+		seed.TenantID,
+	).Scan(&storedHash); err != nil {
+		t.Fatalf("read colliding user's password: %v", err)
+	}
+	if err := hasher.Verify(privatePassword, storedHash); err != nil {
+		t.Fatalf("colliding user's private password changed: %v", err)
+	}
+	if err := hasher.Verify(seed.UserPass, storedHash); err == nil {
+		t.Fatal("colliding user adopted the public local bootstrap password")
+	}
+
+	var ledgerCount int
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM sqlite_master
+		 WHERE type = 'table' AND name = 'starterapp_bootstrap_identity'`,
+	).Scan(&ledgerCount); err != nil {
+		t.Fatalf("inspect collision migration ledger: %v", err)
+	}
+	if ledgerCount != 0 {
+		t.Fatal("failed collision resolution committed a bootstrap identity ledger")
 	}
 }
 

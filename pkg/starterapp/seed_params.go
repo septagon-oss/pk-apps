@@ -53,11 +53,12 @@ func resolveSeedParams(cfg *Config) (seed.Params, error) {
 }
 
 // seedBannerCredential returns what the development-only startup banner may
-// show for the local login. Outside development both fields are redacted; the
-// public root page never renders either value.
+// show for the local login. Outside development the email remains available to
+// the operator while the password is redacted; the public root page never
+// renders either value.
 func seedBannerCredential(cfg *Config, params seed.Params) (email, password string) {
 	if cfg.Environment == "development" {
 		return params.AdminEmail, params.AdminPassword
 	}
-	return "(see seed.admin_email)", "(set via seed.admin_password)"
+	return params.AdminEmail, "(set via seed.admin_password)"
 }

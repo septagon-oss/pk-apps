@@ -191,7 +191,12 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	bootstrapIDs, err := resolveBootstrapIdentity(ctx, db, seedParams.AdminEmail)
+	bootstrapIDs, err := resolveBootstrapIdentity(
+		ctx,
+		db,
+		seedParams.AdminEmail,
+		cfg.Seed.AdminEmail != "",
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -457,9 +462,7 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		openAPIOperations: openAPIOperations,
 	}
 	app.seedEmail, app.seedPassword = seedBannerCredential(cfg, seedParams)
-	if cfg.Environment == "development" {
-		app.seedEmail = seededAdmin.Email
-	}
+	app.seedEmail = seededAdmin.Email
 	return app, nil
 }
 

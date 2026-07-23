@@ -52,6 +52,7 @@ func resolveBootstrapIdentity(
 	ctx context.Context,
 	db *sql.DB,
 	adminEmail string,
+	adminEmailConfigured bool,
 ) (bootstrapIdentity, error) {
 	if db == nil {
 		return bootstrapIdentity{}, errors.New("starterapp: resolve bootstrap identity requires a database")
@@ -124,6 +125,13 @@ func resolveBootstrapIdentity(
 	if err != nil {
 		return bootstrapIdentity{}, fmt.Errorf("starterapp: inspect released bootstrap tenant: %w", err)
 	}
+	currentTenantExists, err := rowExists(
+		`SELECT COUNT(*) FROM tenants WHERE id = ?`,
+		seed.TenantID,
+	)
+	if err != nil {
+		return bootstrapIdentity{}, fmt.Errorf("starterapp: inspect current bootstrap tenant: %w", err)
+	}
 
 	legacyUserTenant, legacyUserExists, err := userTenant(legacyBootstrapUserID)
 	if err != nil {
@@ -145,23 +153,22 @@ func resolveBootstrapIdentity(
 
 		// A replacement bootstrap administrator may have been provisioned
 		// under an application-owned ID. Resolve that identity by the released
-		// or configured email before considering the newly introduced default
-		// ID: previous releases did not reserve seed.UserID, so an unrelated
-		// account may legitimately own it.
-		rows, err := db.QueryContext(
-			ctx,
-			`SELECT id
-			 FROM users
-			 WHERE tenant_id = ? AND (email = ? OR email = ?)
-			 ORDER BY id`,
-			legacyBootstrapTenantID,
-			legacyBootstrapUserEmail,
-			adminEmail,
-		)
+		// email or an explicitly configured email before considering any new
+		// ID: previous releases did not reserve seed.UserID or seed.UserEmail,
+		// so an unrelated account may legitimately own either default.
+		query := `SELECT id
+			FROM users
+			WHERE (tenant_id = ? AND email = ?)`
+		args := []any{legacyBootstrapTenantID, legacyBootstrapUserEmail}
+		if adminEmailConfigured && adminEmail != legacyBootstrapUserEmail {
+			query += ` OR (tenant_id = ? AND email = ?)`
+			args = append(args, legacyBootstrapTenantID, adminEmail)
+		}
+		query += ` ORDER BY id`
+		rows, err := db.QueryContext(ctx, query, args...)
 		if err != nil {
 			return bootstrapIdentity{}, fmt.Errorf("starterapp: find prior email-keyed administrator: %w", err)
 		}
-		defer rows.Close()
 		var emailKeyedIDs []string
 		for rows.Next() {
 			var id string
@@ -184,8 +191,8 @@ func resolveBootstrapIdentity(
 			}, nil
 		case 0:
 			// A partial prior boot may have created the tenant but not the
-			// administrator. Create the neutral fresh-install user ID under the
-			// preserved tenant ID.
+			// administrator. Recreate the released durable user ID when it is
+			// still available so contributed-module references remain valid.
 		default:
 			return bootstrapIdentity{}, fmt.Errorf(
 				"starterapp: ambiguous prior email-keyed administrators under tenant %q: %v",
@@ -195,11 +202,11 @@ func resolveBootstrapIdentity(
 		}
 
 		// No released administrator survived (for example, a partial old
-		// bootstrap created only the tenant). Select an unused neutral ID for
-		// the new administrator instead of granting privileges to an account
-		// that happens to own the now-default ID.
-		candidate := seed.UserID
-		for suffix := 0; ; suffix++ {
+		// bootstrap created only the tenant). Prefer the released durable ID,
+		// then select an unused current ID instead of granting privileges to an
+		// account that happens to own either candidate.
+		candidate := legacyBootstrapUserID
+		for attempt := 0; ; attempt++ {
 			exists, lookupErr := rowExists(`SELECT COUNT(*) FROM users WHERE id = ?`, candidate)
 			if lookupErr != nil {
 				return bootstrapIdentity{}, fmt.Errorf("starterapp: select bootstrap administrator ID: %w", lookupErr)
@@ -210,15 +217,27 @@ func resolveBootstrapIdentity(
 					UserID:   candidate,
 				}, nil
 			}
-			if suffix == 0 {
+			switch attempt {
+			case 0:
+				candidate = seed.UserID
+			case 1:
 				candidate = seed.UserID + "_bootstrap"
-				continue
+			default:
+				candidate = fmt.Sprintf("%s_bootstrap_%d", seed.UserID, attempt)
 			}
-			candidate = fmt.Sprintf("%s_bootstrap_%d", seed.UserID, suffix+1)
 		}
 	}
 
 	if legacyUserExists {
+		if legacyUserTenant == legacyBootstrapTenantID {
+			// The old seed created tenant and user independently. If only the
+			// tenant row was lost, keep the released IDs so seed.Run can heal
+			// the tenant without orphaning surviving tenant-owned data.
+			return bootstrapIdentity{
+				TenantID: legacyBootstrapTenantID,
+				UserID:   legacyBootstrapUserID,
+			}, nil
+		}
 		return bootstrapIdentity{}, fmt.Errorf(
 			"starterapp: released bootstrap administrator %q exists under tenant %q without released tenant %q",
 			legacyBootstrapUserID,
@@ -226,12 +245,14 @@ func resolveBootstrapIdentity(
 			legacyBootstrapTenantID,
 		)
 	}
-	if currentUserExists && currentUserTenant != seed.TenantID {
+	if currentTenantExists || currentUserExists {
 		return bootstrapIdentity{}, fmt.Errorf(
-			"starterapp: current bootstrap administrator ID %q belongs to tenant %q, not %q",
-			seed.UserID,
-			currentUserTenant,
+			"starterapp: unrecorded bootstrap ID collision: tenant %q exists=%t; user %q exists=%t under tenant %q",
 			seed.TenantID,
+			currentTenantExists,
+			seed.UserID,
+			currentUserExists,
+			currentUserTenant,
 		)
 	}
 	return bootstrapIdentity{TenantID: seed.TenantID, UserID: seed.UserID}, nil
@@ -471,6 +492,7 @@ func migrateBootstrapIdentity(
 	replacementDisplay := legacyUserDisplay
 	replacementPassHash := legacyPassHash
 	legacyPasswordWasDefault := false
+	recreatingBootstrapUser := !legacyUserExists
 	if legacyUserExists {
 		if legacyUserEmail == legacyBootstrapUserEmail {
 			replacementEmail, err = availableEmail(adminEmail)
@@ -525,7 +547,7 @@ func migrateBootstrapIdentity(
 			return fmt.Errorf("starterapp: neutralize bootstrap administrator labels: %w", err)
 		}
 	}
-	if legacyPasswordWasDefault {
+	if legacyPasswordWasDefault || recreatingBootstrapUser {
 		if _, err := tx.ExecContext(
 			ctx,
 			`UPDATE auth_sessions
@@ -535,7 +557,20 @@ func migrateBootstrapIdentity(
 			identity.TenantID,
 			identity.UserID,
 		); err != nil {
-			return fmt.Errorf("starterapp: revoke sessions issued under the released bootstrap password: %w", err)
+			return fmt.Errorf("starterapp: revoke sessions for migrated bootstrap administrator: %w", err)
+		}
+	}
+	if recreatingBootstrapUser {
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE api_keys
+			 SET revoked_at = ?
+			 WHERE tenant_id = ? AND user_id = ? AND revoked_at IS NULL`,
+			now,
+			identity.TenantID,
+			identity.UserID,
+		); err != nil {
+			return fmt.Errorf("starterapp: revoke API keys for recreated bootstrap administrator: %w", err)
 		}
 	}
 

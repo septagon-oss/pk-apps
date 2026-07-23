@@ -97,7 +97,7 @@ func printBanner(cfg *Config, app *App) {
 		fmt.Printf("  local tenant: %s\n", app.seedTenantID)
 		fmt.Printf("  local login:  %s / %s\n", app.seedEmail, app.seedPassword)
 	} else {
-		fmt.Println("  admin login:  configured seed account (password is never printed)")
+		fmt.Printf("  admin login:  %s (password is never printed)\n", app.seedEmail)
 	}
 	ids := app.AllModuleIDs()
 	fmt.Printf("  modules:      %d composed (%s)\n", len(ids), strings.Join(ids, ", "))
