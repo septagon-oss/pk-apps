@@ -21,8 +21,6 @@ import (
 	"github.com/septagon-oss/pk-core/pkg/security/cookies"
 	"github.com/septagon-oss/pk-core/pkg/security/identity"
 	"github.com/septagon-oss/pk-modules/pkg/auth"
-
-	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
 )
 
 const (
@@ -342,7 +340,7 @@ func (a *App) registerAdminAuth(mux *http.ServeMux) {
 		case http.MethodGet:
 			tenantID, email := "", ""
 			if a.environment == "development" {
-				tenantID, email = seed.TenantID, a.seedEmail
+				tenantID, email = a.seedTenantID, a.seedEmail
 			}
 			a.renderAdminLogin(w, tenantID, email, "", http.StatusOK)
 		case http.MethodPost:
@@ -391,7 +389,7 @@ func (a *App) renderAdminLogin(w http.ResponseWriter, tenantID, email, errMsg st
 		AppName:         a.appName,
 		Environment:     a.environment,
 		Development:     a.environment == "development",
-		BootstrapTenant: seed.TenantID,
+		BootstrapTenant: a.seedTenantID,
 		BootstrapEmail:  a.seedEmail,
 	})
 }

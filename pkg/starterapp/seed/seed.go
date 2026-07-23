@@ -10,8 +10,8 @@
 // Why self-repair: a clone-and-run starter can crash mid-seed (tenant created
 // but admin user not yet, or a wiped credential row). A tenant-only "already
 // seeded?" gate would then skip user repair forever, permanently stranding the
-// advertised default login. Each entity is therefore checked by its own stable
-// identity (tenant slug, user email) and created-or-repaired on its own.
+// advertised default login. Each entity is therefore checked by its selected
+// durable ID and created-or-repaired on its own.
 //
 // ADR: ADR-0009 (ports-only module communication), ADR-0029 (file purpose declaration).
 // Convention: C-14 (every Go file declares its purpose).
@@ -52,6 +52,11 @@ type Params struct {
 	AdminEmail     string
 	AdminPassword  string
 	RepairPassword bool
+	// TenantID and UserID override the fresh-install identifiers when an
+	// upgrade must preserve durable bootstrap IDs already referenced by
+	// downstream module tables. Empty values use TenantID and UserID above.
+	TenantID string
+	UserID   string
 }
 
 // Result reports what the seed did, so callers can (for example) print a
@@ -61,11 +66,12 @@ type Result struct {
 	AdminCreated  bool
 }
 
-// Run ensures the default tenant and admin user exist. It checks each entity by
-// its stable identity and creates it independently, so a partial prior boot
-// (tenant present but admin user missing) heals on the next call. It is safe to
-// call on every boot and never produces duplicate rows. An existing admin's
-// password is left untouched unless params.RepairPassword is set.
+// Run ensures the selected bootstrap tenant and administrator exist. Empty ID
+// overrides select the neutral fresh-install constants; upgrades can provide
+// released durable IDs so downstream references remain valid. Each entity is
+// created independently, so a partial prior boot heals on the next call. An
+// existing administrator's password is left untouched unless
+// params.RepairPassword is set.
 func Run(ctx context.Context, tenantSvc tenant.TenantService, userSvc user.UserService, params Params) (Result, error) {
 	var res Result
 	if tenantSvc == nil {
@@ -80,14 +86,22 @@ func Run(ctx context.Context, tenantSvc tenant.TenantService, userSvc user.UserS
 	if params.AdminPassword == "" {
 		return res, errors.New("seed: admin password is required")
 	}
+	tenantID := params.TenantID
+	if tenantID == "" {
+		tenantID = TenantID
+	}
+	userID := params.UserID
+	if userID == "" {
+		userID = UserID
+	}
 
-	created, err := ensureTenant(ctx, tenantSvc)
+	created, err := ensureTenant(ctx, tenantSvc, tenantID)
 	if err != nil {
 		return res, err
 	}
 	res.TenantCreated = created
 
-	adminCreated, err := ensureAdminUser(ctx, userSvc, params)
+	adminCreated, err := ensureAdminUser(ctx, userSvc, params, tenantID, userID)
 	if err != nil {
 		return res, err
 	}
@@ -99,18 +113,26 @@ func Run(ctx context.Context, tenantSvc tenant.TenantService, userSvc user.UserS
 // keyed first on its stable ID. Looking up the ID before the default slug
 // preserves an operator-customized slug across upgrades. An existing tenant is
 // left untouched. It reports whether it created the tenant.
-func ensureTenant(ctx context.Context, tenantSvc tenant.TenantService) (bool, error) {
-	existing, err := tenantSvc.Get(ctx, TenantID)
+func ensureTenant(ctx context.Context, tenantSvc tenant.TenantService, tenantID string) (bool, error) {
+	existing, err := tenantSvc.Get(ctx, tenantID)
 	if err == nil && existing != nil {
 		return false, nil
 	}
 
 	existing, err = tenantSvc.GetBySlug(ctx, TenantSlug)
 	if err == nil && existing != nil {
+		if existing.ID != tenantID {
+			return false, fmt.Errorf(
+				"seed: bootstrap slug %q belongs to tenant %q, not selected durable tenant %q",
+				TenantSlug,
+				existing.ID,
+				tenantID,
+			)
+		}
 		return false, nil
 	}
 	t := &tenant.Tenant{
-		ID:   TenantID,
+		ID:   tenantID,
 		Slug: TenantSlug,
 		Name: TenantName,
 	}
@@ -127,12 +149,18 @@ func ensureTenant(ctx context.Context, tenantSvc tenant.TenantService) (bool, er
 // upgrades. This is the fix for the v0.1.0 backdoor where the password was
 // re-asserted unconditionally on every boot, silently reverting an operator's
 // change. It reports whether it created the admin.
-func ensureAdminUser(ctx context.Context, userSvc user.UserService, params Params) (bool, error) {
-	existing, err := userSvc.Get(ctx, TenantID, UserID)
+func ensureAdminUser(
+	ctx context.Context,
+	userSvc user.UserService,
+	params Params,
+	tenantID string,
+	userID string,
+) (bool, error) {
+	existing, err := userSvc.Get(ctx, tenantID, userID)
 	if err == nil && existing != nil {
 		if params.RepairPassword {
-			if vErr := userSvc.VerifyPassword(ctx, TenantID, existing.ID, params.AdminPassword); vErr != nil {
-				if sErr := userSvc.SetPassword(ctx, TenantID, existing.ID, params.AdminPassword); sErr != nil {
+			if vErr := userSvc.VerifyPassword(ctx, tenantID, existing.ID, params.AdminPassword); vErr != nil {
+				if sErr := userSvc.SetPassword(ctx, tenantID, existing.ID, params.AdminPassword); sErr != nil {
 					return false, fmt.Errorf("seed: repair admin password: %w", sErr)
 				}
 			}
@@ -141,8 +169,8 @@ func ensureAdminUser(ctx context.Context, userSvc user.UserService, params Param
 	}
 
 	u := &user.User{
-		ID:          UserID,
-		TenantID:    TenantID,
+		ID:          userID,
+		TenantID:    tenantID,
 		Email:       params.AdminEmail,
 		Username:    UserName,
 		DisplayName: UserDisplay,
@@ -151,7 +179,7 @@ func ensureAdminUser(ctx context.Context, userSvc user.UserService, params Param
 	if err := userSvc.Create(ctx, u); err != nil {
 		return false, fmt.Errorf("seed: create user: %w", err)
 	}
-	if err := userSvc.SetPassword(ctx, TenantID, u.ID, params.AdminPassword); err != nil {
+	if err := userSvc.SetPassword(ctx, tenantID, u.ID, params.AdminPassword); err != nil {
 		return false, fmt.Errorf("seed: set admin password: %w", err)
 	}
 	return true, nil

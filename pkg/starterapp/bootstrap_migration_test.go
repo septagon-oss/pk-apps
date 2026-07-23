@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,7 +41,7 @@ const (
 	releasedBootstrapUserPassword = "changeme"
 )
 
-func TestBuildAppMigratesLegacyBootstrapIdentityAndOwnedData(t *testing.T) {
+func TestBuildAppNeutralizesLegacyBootstrapLabelsAndPreservesDurableIDs(t *testing.T) {
 	ctx := context.Background()
 	cfg := freshConfig(t)
 	createLegacyBootstrapFixture(t, cfg.Database.DSN)
@@ -50,7 +51,7 @@ func TestBuildAppMigratesLegacyBootstrapIdentityAndOwnedData(t *testing.T) {
 		t.Fatalf("BuildApp() migration error = %v", err)
 	}
 
-	migratedTenant, err := app.tenant.Service().Get(ctx, seed.TenantID)
+	migratedTenant, err := app.tenant.Service().Get(ctx, releasedBootstrapTenantID)
 	if err != nil {
 		t.Fatalf("migrated tenant lookup: %v", err)
 	}
@@ -64,7 +65,11 @@ func TestBuildAppMigratesLegacyBootstrapIdentityAndOwnedData(t *testing.T) {
 		)
 	}
 
-	adminUser, err := app.user.Service().Get(ctx, seed.TenantID, seed.UserID)
+	adminUser, err := app.user.Service().Get(
+		ctx,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+	)
 	if err != nil {
 		t.Fatalf("migrated administrator lookup: %v", err)
 	}
@@ -80,21 +85,24 @@ func TestBuildAppMigratesLegacyBootstrapIdentityAndOwnedData(t *testing.T) {
 			seed.UserDisplay,
 		)
 	}
-	if app.adminSubject != seed.UserID {
-		t.Fatalf("adminSubject = %q, want %q", app.adminSubject, seed.UserID)
+	if app.adminSubject != releasedBootstrapUserID {
+		t.Fatalf("adminSubject = %q, want %q", app.adminSubject, releasedBootstrapUserID)
+	}
+	if app.seedTenantID != releasedBootstrapTenantID {
+		t.Fatalf("seedTenantID = %q, want %q", app.seedTenantID, releasedBootstrapTenantID)
 	}
 	if err := app.user.Service().VerifyPassword(
 		ctx,
-		seed.TenantID,
-		seed.UserID,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
 		seed.UserPass,
 	); err != nil {
 		t.Fatalf("current bootstrap password does not verify: %v", err)
 	}
 	if err := app.user.Service().VerifyPassword(
 		ctx,
-		seed.TenantID,
-		seed.UserID,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
 		releasedBootstrapUserPassword,
 	); err == nil {
 		t.Fatal("historical bootstrap password still verifies after migration")
@@ -106,7 +114,7 @@ func TestBuildAppMigratesLegacyBootstrapIdentityAndOwnedData(t *testing.T) {
 	}); err == nil {
 		t.Fatal("historical bootstrap login still succeeds after migration")
 	}
-	session, err := app.authMod.Service().Login(ctx, seed.TenantID, auth.Credentials{
+	session, err := app.authMod.Service().Login(ctx, releasedBootstrapTenantID, auth.Credentials{
 		Email:    seed.UserEmail,
 		Password: seed.UserPass,
 	})
@@ -126,7 +134,14 @@ func TestBuildAppMigratesLegacyBootstrapIdentityAndOwnedData(t *testing.T) {
 		t.Fatalf("migrated administrator GET /admin status = %d, want 200", rec.Code)
 	}
 
-	assertNoLegacyBootstrapReferences(t, app.db, 2)
+	loginReq := httptest.NewRequest(http.MethodGet, "/admin/login", nil)
+	loginRec := httptest.NewRecorder()
+	mux.ServeHTTP(loginRec, loginReq)
+	if !strings.Contains(loginRec.Body.String(), `value="`+releasedBootstrapTenantID+`"`) {
+		t.Fatalf("development login does not prefill preserved tenant ID: %s", loginRec.Body.String())
+	}
+
+	assertDurableBootstrapReferencesPreserved(t, app.db, 2)
 
 	var (
 		contentTenant string
@@ -139,7 +154,9 @@ func TestBuildAppMigratesLegacyBootstrapIdentityAndOwnedData(t *testing.T) {
 	).Scan(&contentTenant, &contentAuthor, &contentBody); err != nil {
 		t.Fatalf("read migrated content: %v", err)
 	}
-	if contentTenant != seed.TenantID || contentAuthor != seed.UserID || contentBody != "preserve me" {
+	if contentTenant != releasedBootstrapTenantID ||
+		contentAuthor != releasedBootstrapUserID ||
+		contentBody != "preserve me" {
 		t.Fatalf(
 			"migrated content = tenant %q author %q body %q",
 			contentTenant,
@@ -184,15 +201,15 @@ func TestBuildAppMigratesLegacyBootstrapIdentityAndOwnedData(t *testing.T) {
 	if err := second.db.QueryRowContext(
 		ctx,
 		`SELECT COUNT(*) FROM tenants WHERE id = ?`,
-		seed.TenantID,
+		releasedBootstrapTenantID,
 	).Scan(&tenantCount); err != nil {
 		t.Fatalf("count current tenants: %v", err)
 	}
 	if err := second.db.QueryRowContext(
 		ctx,
 		`SELECT COUNT(*) FROM users WHERE id = ? AND tenant_id = ?`,
-		seed.UserID,
-		seed.TenantID,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
 	).Scan(&userCount); err != nil {
 		t.Fatalf("count current administrators: %v", err)
 	}
@@ -255,7 +272,7 @@ func TestBootstrapMigrationPreservesCustomizedProductionIdentity(t *testing.T) {
 	}
 	defer app.Close()
 
-	migratedTenant, err := app.tenant.Service().Get(ctx, seed.TenantID)
+	migratedTenant, err := app.tenant.Service().Get(ctx, releasedBootstrapTenantID)
 	if err != nil {
 		t.Fatalf("migrated customized tenant lookup: %v", err)
 	}
@@ -267,7 +284,11 @@ func TestBootstrapMigrationPreservesCustomizedProductionIdentity(t *testing.T) {
 		)
 	}
 
-	migratedUser, err := app.user.Service().Get(ctx, seed.TenantID, seed.UserID)
+	migratedUser, err := app.user.Service().Get(
+		ctx,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+	)
 	if err != nil {
 		t.Fatalf("migrated customized administrator lookup: %v", err)
 	}
@@ -283,16 +304,16 @@ func TestBootstrapMigrationPreservesCustomizedProductionIdentity(t *testing.T) {
 	}
 	if err := app.user.Service().VerifyPassword(
 		ctx,
-		seed.TenantID,
-		seed.UserID,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
 		customPassword,
 	); err != nil {
 		t.Fatalf("customized password was not preserved: %v", err)
 	}
 	if err := app.user.Service().VerifyPassword(
 		ctx,
-		seed.TenantID,
-		seed.UserID,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
 		cfg.Seed.AdminPassword,
 	); err == nil {
 		t.Fatal("production migration replaced the operator-rotated password")
@@ -309,7 +330,110 @@ func TestBootstrapMigrationPreservesCustomizedProductionIdentity(t *testing.T) {
 		t.Fatal("migration revoked a session after the bootstrap password had been rotated")
 	}
 
-	assertNoLegacyBootstrapReferences(t, app.db, 1)
+	assertDurableBootstrapReferencesPreserved(t, app.db, 1)
+}
+
+func TestBootstrapMigrationFindsPriorEmailKeyedReplacementAdministrator(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	const replacementUserID = "replacement_owner"
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open replacement-administrator fixture: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`UPDATE users SET id = ? WHERE tenant_id = ? AND id = ?`,
+		replacementUserID,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+	); err != nil {
+		t.Fatalf("replace prior email-keyed administrator: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close replacement-administrator fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() with replacement administrator: %v", err)
+	}
+	replacement, err := app.user.Service().Get(
+		ctx,
+		releasedBootstrapTenantID,
+		replacementUserID,
+	)
+	if err != nil {
+		t.Fatalf("resolve replacement administrator: %v", err)
+	}
+	if replacement.Email != seed.UserEmail ||
+		replacement.Username != seed.UserName ||
+		replacement.DisplayName != seed.UserDisplay {
+		t.Fatalf(
+			"replacement administrator labels = email %q username %q display %q",
+			replacement.Email,
+			replacement.Username,
+			replacement.DisplayName,
+		)
+	}
+	if app.adminSubject != replacementUserID {
+		t.Fatalf("adminSubject = %q, want replacement ID %q", app.adminSubject, replacementUserID)
+	}
+	if _, err := app.authMod.Service().Login(ctx, releasedBootstrapTenantID, auth.Credentials{
+		Email:    seed.UserEmail,
+		Password: seed.UserPass,
+	}); err != nil {
+		t.Fatalf("replacement administrator current login: %v", err)
+	}
+	var recordedTenantID, recordedUserID string
+	if err := app.db.QueryRowContext(
+		ctx,
+		`SELECT tenant_id, user_id
+		 FROM starterapp_bootstrap_identity
+		 WHERE id = 'active'`,
+	).Scan(&recordedTenantID, &recordedUserID); err != nil {
+		t.Fatalf("read recorded replacement identity: %v", err)
+	}
+	if recordedTenantID != releasedBootstrapTenantID || recordedUserID != replacementUserID {
+		t.Fatalf(
+			"recorded identity = tenant %q user %q, want tenant %q user %q",
+			recordedTenantID,
+			recordedUserID,
+			releasedBootstrapTenantID,
+			replacementUserID,
+		)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatalf("close replacement-administrator app: %v", err)
+	}
+
+	// A later configuration change must not make identity discovery fall back
+	// to email and create a second administrator. The durable ledger remains
+	// authoritative after the one-time migration.
+	cfg.Environment = "production"
+	cfg.Seed.AdminEmail = "new-config-value@customer.test"
+	cfg.Seed.AdminPassword = "new-configuration-only-password"
+	second, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("second BuildApp() with changed configuration: %v", err)
+	}
+	defer second.Close()
+	if second.adminSubject != replacementUserID {
+		t.Fatalf("second adminSubject = %q, want %q", second.adminSubject, replacementUserID)
+	}
+	var currentIDCount int
+	if err := second.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM users WHERE id = ?`,
+		seed.UserID,
+	).Scan(&currentIDCount); err != nil {
+		t.Fatalf("count duplicate current administrator: %v", err)
+	}
+	if currentIDCount != 0 {
+		t.Fatalf("current administrator duplicates = %d, want 0", currentIDCount)
+	}
 }
 
 func createLegacyBootstrapFixture(t *testing.T, dsn string) {
@@ -338,6 +462,15 @@ func createLegacyBootstrapFixture(t *testing.T, dsn string) {
 		if err := initializer.run(db); err != nil {
 			t.Fatalf("initialize %s store: %v", initializer.name, err)
 		}
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE extension_assets (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			owner_id TEXT NOT NULL,
+			name TEXT NOT NULL
+		)`); err != nil {
+		t.Fatalf("initialize contributed-module fixture: %v", err)
 	}
 
 	hasher, err := passhash.NewBcrypt(passhash.MinCost)
@@ -419,6 +552,12 @@ func createLegacyBootstrapFixture(t *testing.T, dsn string) {
 			 VALUES ('subscription_existing', ?, ?, 'system', 'in_app', ?)`,
 			[]any{releasedBootstrapTenantID, releasedBootstrapUserID, now},
 		},
+		{
+			"contributed-module row",
+			`INSERT INTO extension_assets (id, tenant_id, owner_id, name)
+			 VALUES ('asset_existing', ?, ?, 'preserve me')`,
+			[]any{releasedBootstrapTenantID, releasedBootstrapUserID},
+		},
 	}
 	for _, insert := range inserts {
 		if _, err := db.Exec(insert.query, insert.args...); err != nil {
@@ -427,7 +566,7 @@ func createLegacyBootstrapFixture(t *testing.T, dsn string) {
 	}
 }
 
-func assertNoLegacyBootstrapReferences(t *testing.T, db *sql.DB, expectedSessions int) {
+func assertDurableBootstrapReferencesPreserved(t *testing.T, db *sql.DB, expectedSessions int) {
 	t.Helper()
 
 	checks := []struct {
@@ -435,31 +574,76 @@ func assertNoLegacyBootstrapReferences(t *testing.T, db *sql.DB, expectedSession
 		query string
 		args  []any
 	}{
-		{"tenant ID", `SELECT COUNT(*) FROM tenants WHERE id = ?`, []any{releasedBootstrapTenantID}},
-		{"tenant slug", `SELECT COUNT(*) FROM tenants WHERE slug = ?`, []any{releasedBootstrapTenantSlug}},
-		{"user ID", `SELECT COUNT(*) FROM users WHERE id = ?`, []any{releasedBootstrapUserID}},
-		{"user tenant", `SELECT COUNT(*) FROM users WHERE tenant_id = ?`, []any{releasedBootstrapTenantID}},
-		{"session identity", `SELECT COUNT(*) FROM auth_sessions WHERE tenant_id = ? OR user_id = ?`, []any{releasedBootstrapTenantID, releasedBootstrapUserID}},
-		{"API key identity", `SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? OR user_id = ?`, []any{releasedBootstrapTenantID, releasedBootstrapUserID}},
-		{"audit identity", `SELECT COUNT(*) FROM audit_events WHERE tenant_id = ? OR actor = ?`, []any{releasedBootstrapTenantID, releasedBootstrapUserID}},
-		{"content identity", `SELECT COUNT(*) FROM content WHERE tenant_id = ? OR author_id = ?`, []any{releasedBootstrapTenantID, releasedBootstrapUserID}},
-		{"notification identity", `SELECT COUNT(*) FROM notifications WHERE tenant_id = ? OR user_id = ?`, []any{releasedBootstrapTenantID, releasedBootstrapUserID}},
-		{"subscription identity", `SELECT COUNT(*) FROM notification_subscriptions WHERE tenant_id = ? OR user_id = ?`, []any{releasedBootstrapTenantID, releasedBootstrapUserID}},
+		{
+			"released tenant slug",
+			`SELECT COUNT(*) FROM tenants WHERE slug = ?`,
+			[]any{releasedBootstrapTenantSlug},
+		},
+		{
+			"released administrator email",
+			`SELECT COUNT(*) FROM users WHERE email = ?`,
+			[]any{releasedBootstrapUserEmail},
+		},
+		{
+			"fresh-install tenant ID",
+			`SELECT COUNT(*) FROM tenants WHERE id = ?`,
+			[]any{seed.TenantID},
+		},
+		{
+			"fresh-install administrator ID",
+			`SELECT COUNT(*) FROM users WHERE id = ?`,
+			[]any{seed.UserID},
+		},
+		{
+			"fresh-install session identity",
+			`SELECT COUNT(*) FROM auth_sessions WHERE tenant_id = ? OR user_id = ?`,
+			[]any{seed.TenantID, seed.UserID},
+		},
+		{
+			"fresh-install API-key identity",
+			`SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? OR user_id = ?`,
+			[]any{seed.TenantID, seed.UserID},
+		},
+		{
+			"fresh-install audit identity",
+			`SELECT COUNT(*) FROM audit_events WHERE tenant_id = ? OR actor = ?`,
+			[]any{seed.TenantID, seed.UserID},
+		},
+		{
+			"fresh-install content identity",
+			`SELECT COUNT(*) FROM content WHERE tenant_id = ? OR author_id = ?`,
+			[]any{seed.TenantID, seed.UserID},
+		},
+		{
+			"fresh-install notification identity",
+			`SELECT COUNT(*) FROM notifications WHERE tenant_id = ? OR user_id = ?`,
+			[]any{seed.TenantID, seed.UserID},
+		},
+		{
+			"fresh-install subscription identity",
+			`SELECT COUNT(*) FROM notification_subscriptions WHERE tenant_id = ? OR user_id = ?`,
+			[]any{seed.TenantID, seed.UserID},
+		},
+		{
+			"fresh-install contributed identity",
+			`SELECT COUNT(*) FROM extension_assets WHERE tenant_id = ? OR owner_id = ?`,
+			[]any{seed.TenantID, seed.UserID},
+		},
 	}
 	for _, check := range checks {
 		var count int
 		if err := db.QueryRow(check.query, check.args...).Scan(&count); err != nil {
-			t.Fatalf("count legacy %s: %v", check.name, err)
+			t.Fatalf("count stale %s: %v", check.name, err)
 		}
 		if count != 0 {
-			t.Errorf("legacy %s references = %d, want 0", check.name, count)
+			t.Errorf("stale %s rows = %d, want 0", check.name, count)
 		}
 	}
 
-	var migratedCounts string
+	var preservedCounts string
 	if err := db.QueryRow(`
 		SELECT printf(
-			'tenant=%d user=%d session=%d key=%d audit=%d content=%d notification=%d subscription=%d',
+			'tenant=%d user=%d session=%d key=%d audit=%d content=%d notification=%d subscription=%d extension=%d',
 			(SELECT COUNT(*) FROM tenants WHERE id = ?),
 			(SELECT COUNT(*) FROM users WHERE tenant_id = ? AND id = ?),
 			(SELECT COUNT(*) FROM auth_sessions WHERE tenant_id = ? AND user_id = ?),
@@ -467,24 +651,26 @@ func assertNoLegacyBootstrapReferences(t *testing.T, db *sql.DB, expectedSession
 			(SELECT COUNT(*) FROM audit_events WHERE tenant_id = ? AND actor = ?),
 			(SELECT COUNT(*) FROM content WHERE tenant_id = ? AND author_id = ?),
 			(SELECT COUNT(*) FROM notifications WHERE tenant_id = ? AND user_id = ?),
-			(SELECT COUNT(*) FROM notification_subscriptions WHERE tenant_id = ? AND user_id = ?)
+			(SELECT COUNT(*) FROM notification_subscriptions WHERE tenant_id = ? AND user_id = ?),
+			(SELECT COUNT(*) FROM extension_assets WHERE tenant_id = ? AND owner_id = ?)
 		)`,
-		seed.TenantID,
-		seed.TenantID, seed.UserID,
-		seed.TenantID, seed.UserID,
-		seed.TenantID, seed.UserID,
-		seed.TenantID, seed.UserID,
-		seed.TenantID, seed.UserID,
-		seed.TenantID, seed.UserID,
-		seed.TenantID, seed.UserID,
-	).Scan(&migratedCounts); err != nil {
-		t.Fatalf("read migrated reference counts: %v", err)
+		releasedBootstrapTenantID,
+		releasedBootstrapTenantID, releasedBootstrapUserID,
+		releasedBootstrapTenantID, releasedBootstrapUserID,
+		releasedBootstrapTenantID, releasedBootstrapUserID,
+		releasedBootstrapTenantID, releasedBootstrapUserID,
+		releasedBootstrapTenantID, releasedBootstrapUserID,
+		releasedBootstrapTenantID, releasedBootstrapUserID,
+		releasedBootstrapTenantID, releasedBootstrapUserID,
+		releasedBootstrapTenantID, releasedBootstrapUserID,
+	).Scan(&preservedCounts); err != nil {
+		t.Fatalf("read preserved reference counts: %v", err)
 	}
 	want := fmt.Sprintf(
-		"tenant=1 user=1 session=%d key=1 audit=1 content=1 notification=1 subscription=1",
+		"tenant=1 user=1 session=%d key=1 audit=1 content=1 notification=1 subscription=1 extension=1",
 		expectedSessions,
 	)
-	if migratedCounts != want {
-		t.Fatalf("migrated reference counts = %q, want %q", migratedCounts, want)
+	if preservedCounts != want {
+		t.Fatalf("preserved reference counts = %q, want %q", preservedCounts, want)
 	}
 }

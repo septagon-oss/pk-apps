@@ -94,6 +94,7 @@ func printBanner(cfg *Config, app *App) {
 	fmt.Printf("  health:       %s/healthz\n", baseURL)
 	fmt.Printf("  OpenAPI:      %s/openapi/extensions.json\n", baseURL)
 	if cfg.Environment == "development" {
+		fmt.Printf("  local tenant: %s\n", app.seedTenantID)
 		fmt.Printf("  local login:  %s / %s\n", app.seedEmail, app.seedPassword)
 	} else {
 		fmt.Println("  admin login:  configured seed account (password is never printed)")

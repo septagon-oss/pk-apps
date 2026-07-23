@@ -18,7 +18,7 @@ import (
 // generic local identity was introduced. They are migration input only: new
 // databases and current runtime behavior use the constants in package seed.
 const (
-	bootstrapIdentityMigrationID = "20260723_bootstrap_identity_v2"
+	bootstrapIdentityMigrationID = "20260723_bootstrap_labels_v3"
 
 	legacyBootstrapTenantID     = "tenant_acme"
 	legacyBootstrapTenantSlug   = "acme"
@@ -30,25 +30,235 @@ const (
 	legacyBootstrapUserPassword = "changeme"
 )
 
+// bootstrapIdentity is the actual durable tenant/user key pair for this
+// database. Fresh databases use package seed's neutral IDs. Upgraded databases
+// retain the released IDs because downstream module tables may reference them.
+type bootstrapIdentity struct {
+	TenantID string
+	UserID   string
+}
+
 type bootstrapPasswordHasher interface {
 	Hash(plaintext string) (string, error)
 	Verify(plaintext, encoded string) error
 }
 
-// migrateBootstrapIdentity applies the one forward-only durable-state change
-// needed when an existing starter database moves to the generic local
-// bootstrap identity. It preserves tenant-owned rows, customized names,
-// customized administrator identities, rotated passwords, and timestamps.
-// Only values still equal to the old built-in defaults are renamed. If the old
-// built-in password is still present, it is replaced with the current
-// configured password and sessions issued under it are revoked inside the same
-// transaction.
+// resolveBootstrapIdentity chooses the IDs to use before any module binds
+// tenant-scoped behavior. Renaming a released tenant or user ID is unsafe:
+// starterapp.WithModules permits downstream tables unknown to this repository,
+// and those tables may persist either ID without a foreign-key cascade.
+func resolveBootstrapIdentity(
+	ctx context.Context,
+	db *sql.DB,
+	adminEmail string,
+) (bootstrapIdentity, error) {
+	if db == nil {
+		return bootstrapIdentity{}, errors.New("starterapp: resolve bootstrap identity requires a database")
+	}
+	if adminEmail == "" {
+		return bootstrapIdentity{}, errors.New("starterapp: resolve bootstrap identity requires an admin email")
+	}
+
+	rowExists := func(query string, args ...any) (bool, error) {
+		var count int
+		if err := db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
+			return false, err
+		}
+		return count != 0, nil
+	}
+	userTenant := func(id string) (string, bool, error) {
+		var tenantID string
+		err := db.QueryRowContext(ctx, `SELECT tenant_id FROM users WHERE id = ?`, id).Scan(&tenantID)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return "", false, nil
+		case err != nil:
+			return "", false, err
+		default:
+			return tenantID, true, nil
+		}
+	}
+
+	identityTableExists, err := rowExists(
+		`SELECT COUNT(*)
+		 FROM sqlite_master
+		 WHERE type = 'table' AND name = 'starterapp_bootstrap_identity'`,
+	)
+	if err != nil {
+		return bootstrapIdentity{}, fmt.Errorf("starterapp: inspect bootstrap identity ledger: %w", err)
+	}
+	if identityTableExists {
+		var recorded bootstrapIdentity
+		err := db.QueryRowContext(
+			ctx,
+			`SELECT tenant_id, user_id
+			 FROM starterapp_bootstrap_identity
+			 WHERE id = 'active'`,
+		).Scan(&recorded.TenantID, &recorded.UserID)
+		switch {
+		case err == nil:
+			if recorded.TenantID == "" || recorded.UserID == "" {
+				return bootstrapIdentity{}, errors.New("starterapp: recorded bootstrap identity contains an empty ID")
+			}
+			if userTenantID, exists, lookupErr := userTenant(recorded.UserID); lookupErr != nil {
+				return bootstrapIdentity{}, fmt.Errorf("starterapp: validate recorded bootstrap administrator: %w", lookupErr)
+			} else if exists && userTenantID != recorded.TenantID {
+				return bootstrapIdentity{}, fmt.Errorf(
+					"starterapp: recorded bootstrap administrator %q belongs to tenant %q, not %q",
+					recorded.UserID,
+					userTenantID,
+					recorded.TenantID,
+				)
+			}
+			return recorded, nil
+		case !errors.Is(err, sql.ErrNoRows):
+			return bootstrapIdentity{}, fmt.Errorf("starterapp: read bootstrap identity ledger: %w", err)
+		}
+	}
+
+	legacyTenantExists, err := rowExists(
+		`SELECT COUNT(*) FROM tenants WHERE id = ?`,
+		legacyBootstrapTenantID,
+	)
+	if err != nil {
+		return bootstrapIdentity{}, fmt.Errorf("starterapp: inspect released bootstrap tenant: %w", err)
+	}
+	currentTenantExists, err := rowExists(
+		`SELECT COUNT(*) FROM tenants WHERE id = ?`,
+		seed.TenantID,
+	)
+	if err != nil {
+		return bootstrapIdentity{}, fmt.Errorf("starterapp: inspect current bootstrap tenant: %w", err)
+	}
+	if legacyTenantExists && currentTenantExists {
+		return bootstrapIdentity{}, fmt.Errorf(
+			"starterapp: ambiguous bootstrap state: both released tenant %q and current tenant %q exist",
+			legacyBootstrapTenantID,
+			seed.TenantID,
+		)
+	}
+
+	legacyUserTenant, legacyUserExists, err := userTenant(legacyBootstrapUserID)
+	if err != nil {
+		return bootstrapIdentity{}, fmt.Errorf("starterapp: inspect released bootstrap administrator: %w", err)
+	}
+	currentUserTenant, currentUserExists, err := userTenant(seed.UserID)
+	if err != nil {
+		return bootstrapIdentity{}, fmt.Errorf("starterapp: inspect current bootstrap administrator: %w", err)
+	}
+
+	if legacyTenantExists {
+		legacyUserBelongsToTenant := legacyUserExists && legacyUserTenant == legacyBootstrapTenantID
+		currentUserBelongsToTenant := currentUserExists && currentUserTenant == legacyBootstrapTenantID
+		if legacyUserBelongsToTenant && currentUserBelongsToTenant {
+			return bootstrapIdentity{}, fmt.Errorf(
+				"starterapp: ambiguous bootstrap state: both released administrator %q and current administrator %q exist",
+				legacyBootstrapUserID,
+				seed.UserID,
+			)
+		}
+		if legacyUserBelongsToTenant {
+			return bootstrapIdentity{
+				TenantID: legacyBootstrapTenantID,
+				UserID:   legacyBootstrapUserID,
+			}, nil
+		}
+		if currentUserBelongsToTenant {
+			return bootstrapIdentity{
+				TenantID: legacyBootstrapTenantID,
+				UserID:   seed.UserID,
+			}, nil
+		}
+
+		rows, err := db.QueryContext(
+			ctx,
+			`SELECT id
+			 FROM users
+			 WHERE tenant_id = ? AND (email = ? OR email = ?)
+			 ORDER BY id`,
+			legacyBootstrapTenantID,
+			legacyBootstrapUserEmail,
+			adminEmail,
+		)
+		if err != nil {
+			return bootstrapIdentity{}, fmt.Errorf("starterapp: find prior email-keyed administrator: %w", err)
+		}
+		defer rows.Close()
+		var emailKeyedIDs []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return bootstrapIdentity{}, fmt.Errorf("starterapp: scan prior email-keyed administrator: %w", err)
+			}
+			emailKeyedIDs = append(emailKeyedIDs, id)
+		}
+		if err := rows.Err(); err != nil {
+			return bootstrapIdentity{}, fmt.Errorf("starterapp: list prior email-keyed administrators: %w", err)
+		}
+		switch len(emailKeyedIDs) {
+		case 1:
+			return bootstrapIdentity{
+				TenantID: legacyBootstrapTenantID,
+				UserID:   emailKeyedIDs[0],
+			}, nil
+		case 0:
+			// A partial prior boot may have created the tenant but not the
+			// administrator. Create the neutral fresh-install user ID under the
+			// preserved tenant ID.
+		default:
+			return bootstrapIdentity{}, fmt.Errorf(
+				"starterapp: ambiguous prior email-keyed administrators under tenant %q: %v",
+				legacyBootstrapTenantID,
+				emailKeyedIDs,
+			)
+		}
+
+		if currentUserExists {
+			return bootstrapIdentity{}, fmt.Errorf(
+				"starterapp: current bootstrap administrator ID %q belongs to tenant %q, not preserved tenant %q",
+				seed.UserID,
+				currentUserTenant,
+				legacyBootstrapTenantID,
+			)
+		}
+		return bootstrapIdentity{TenantID: legacyBootstrapTenantID, UserID: seed.UserID}, nil
+	}
+
+	if legacyUserExists {
+		return bootstrapIdentity{}, fmt.Errorf(
+			"starterapp: released bootstrap administrator %q exists under tenant %q without released tenant %q",
+			legacyBootstrapUserID,
+			legacyUserTenant,
+			legacyBootstrapTenantID,
+		)
+	}
+	if currentUserExists && currentUserTenant != seed.TenantID {
+		return bootstrapIdentity{}, fmt.Errorf(
+			"starterapp: current bootstrap administrator ID %q belongs to tenant %q, not %q",
+			seed.UserID,
+			currentUserTenant,
+			seed.TenantID,
+		)
+	}
+	return bootstrapIdentity{TenantID: seed.TenantID, UserID: seed.UserID}, nil
+}
+
+// migrateBootstrapIdentity neutralizes visible defaults from older releases
+// without renaming durable tenant or user IDs. Preserving those keys is
+// essential for contributed modules: the starter cannot discover every
+// downstream table that may contain tenant_id, owner_id, or another reference.
+//
+// Customized names, administrator identities, rotated passwords, timestamps,
+// and all tenant-owned rows remain unchanged. When the released default
+// password is still present, it is replaced with the current configured
+// password and sessions issued under it are revoked in the same transaction.
 func migrateBootstrapIdentity(
 	ctx context.Context,
 	db *sql.DB,
 	hasher bootstrapPasswordHasher,
 	adminEmail string,
 	adminPassword string,
+	identity bootstrapIdentity,
 ) error {
 	if db == nil {
 		return errors.New("starterapp: bootstrap identity migration requires a database")
@@ -62,6 +272,9 @@ func migrateBootstrapIdentity(
 	if adminPassword == "" {
 		return errors.New("starterapp: bootstrap identity migration requires an admin password")
 	}
+	if identity.TenantID == "" || identity.UserID == "" {
+		return errors.New("starterapp: bootstrap identity migration requires durable IDs")
+	}
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -73,8 +286,40 @@ func migrateBootstrapIdentity(
 		CREATE TABLE IF NOT EXISTS starterapp_migrations (
 			id TEXT PRIMARY KEY,
 			applied_at DATETIME NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS starterapp_bootstrap_identity (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL
 		)`); err != nil {
 		return fmt.Errorf("starterapp: create migration ledger: %w", err)
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO starterapp_bootstrap_identity (id, tenant_id, user_id)
+		 VALUES ('active', ?, ?)`,
+		identity.TenantID,
+		identity.UserID,
+	); err != nil {
+		return fmt.Errorf("starterapp: record durable bootstrap identity: %w", err)
+	}
+	var recorded bootstrapIdentity
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT tenant_id, user_id
+		 FROM starterapp_bootstrap_identity
+		 WHERE id = 'active'`,
+	).Scan(&recorded.TenantID, &recorded.UserID); err != nil {
+		return fmt.Errorf("starterapp: read durable bootstrap identity: %w", err)
+	}
+	if recorded != identity {
+		return fmt.Errorf(
+			"starterapp: bootstrap identity ledger mismatch: recorded tenant=%q user=%q, resolved tenant=%q user=%q",
+			recorded.TenantID,
+			recorded.UserID,
+			identity.TenantID,
+			identity.UserID,
+		)
 	}
 
 	var alreadyApplied int
@@ -92,18 +337,21 @@ func migrateBootstrapIdentity(
 		return nil
 	}
 
-	var legacyTenantSlug string
+	var (
+		legacyTenantSlug string
+		legacyTenantName string
+	)
 	legacyTenantExists := true
 	err = tx.QueryRowContext(
 		ctx,
-		`SELECT slug FROM tenants WHERE id = ?`,
+		`SELECT slug, name FROM tenants WHERE id = ?`,
 		legacyBootstrapTenantID,
-	).Scan(&legacyTenantSlug)
+	).Scan(&legacyTenantSlug, &legacyTenantName)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		legacyTenantExists = false
 	case err != nil:
-		return fmt.Errorf("starterapp: inspect legacy bootstrap tenant: %w", err)
+		return fmt.Errorf("starterapp: inspect released bootstrap tenant: %w", err)
 	}
 
 	var (
@@ -118,14 +366,14 @@ func migrateBootstrapIdentity(
 		`SELECT email, username, display_name, pass_hash
 		 FROM users
 		 WHERE id = ? AND tenant_id = ?`,
-		legacyBootstrapUserID,
-		legacyBootstrapTenantID,
+		identity.UserID,
+		identity.TenantID,
 	).Scan(&legacyUserEmail, &legacyUserName, &legacyUserDisplay, &legacyPassHash)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		legacyUserExists = false
 	case err != nil:
-		return fmt.Errorf("starterapp: inspect legacy bootstrap administrator: %w", err)
+		return fmt.Errorf("starterapp: inspect released bootstrap administrator: %w", err)
 	}
 
 	countRows := func(query string, args ...any) (int, error) {
@@ -136,37 +384,28 @@ func migrateBootstrapIdentity(
 		return count, nil
 	}
 
+	replacementSlug := legacyTenantSlug
+	replacementTenantName := legacyTenantName
 	if legacyTenantExists {
-		count, err := countRows(
-			`SELECT COUNT(*) FROM tenants WHERE id = ?`,
-			seed.TenantID,
-		)
-		if err != nil {
-			return fmt.Errorf("starterapp: inspect destination bootstrap tenant: %w", err)
-		}
-		if count != 0 {
-			return fmt.Errorf(
-				"starterapp: cannot migrate bootstrap tenant %q: destination ID %q already exists",
-				legacyBootstrapTenantID,
-				seed.TenantID,
-			)
-		}
-
 		if legacyTenantSlug == legacyBootstrapTenantSlug {
-			count, err = countRows(
+			replacementSlug = seed.TenantSlug
+			count, err := countRows(
 				`SELECT COUNT(*) FROM tenants WHERE slug = ? AND id <> ?`,
-				seed.TenantSlug,
+				replacementSlug,
 				legacyBootstrapTenantID,
 			)
 			if err != nil {
-				return fmt.Errorf("starterapp: inspect destination bootstrap slug: %w", err)
+				return fmt.Errorf("starterapp: inspect replacement bootstrap slug: %w", err)
 			}
 			if count != 0 {
 				return fmt.Errorf(
-					"starterapp: cannot migrate bootstrap tenant: destination slug %q already exists",
-					seed.TenantSlug,
+					"starterapp: cannot neutralize bootstrap tenant: slug %q already exists",
+					replacementSlug,
 				)
 			}
+		}
+		if legacyTenantName == legacyBootstrapTenantName {
+			replacementTenantName = seed.TenantName
 		}
 	}
 
@@ -176,21 +415,6 @@ func migrateBootstrapIdentity(
 	replacementPassHash := legacyPassHash
 	legacyPasswordWasDefault := false
 	if legacyUserExists {
-		count, err := countRows(
-			`SELECT COUNT(*) FROM users WHERE id = ?`,
-			seed.UserID,
-		)
-		if err != nil {
-			return fmt.Errorf("starterapp: inspect destination bootstrap administrator: %w", err)
-		}
-		if count != 0 {
-			return fmt.Errorf(
-				"starterapp: cannot migrate bootstrap administrator %q: destination ID %q already exists",
-				legacyBootstrapUserID,
-				seed.UserID,
-			)
-		}
-
 		if legacyUserEmail == legacyBootstrapUserEmail {
 			replacementEmail = adminEmail
 		}
@@ -201,15 +425,14 @@ func migrateBootstrapIdentity(
 			replacementDisplay = seed.UserDisplay
 		}
 
-		count, err = countRows(
+		count, err := countRows(
 			`SELECT COUNT(*)
 			 FROM users
 			 WHERE id <> ?
-			   AND tenant_id IN (?, ?)
+			   AND tenant_id = ?
 			   AND (email = ? OR username = ?)`,
-			legacyBootstrapUserID,
-			legacyBootstrapTenantID,
-			seed.TenantID,
+			identity.UserID,
+			identity.TenantID,
 			replacementEmail,
 			replacementName,
 		)
@@ -218,7 +441,7 @@ func migrateBootstrapIdentity(
 		}
 		if count != 0 {
 			return fmt.Errorf(
-				"starterapp: cannot migrate bootstrap administrator: email %q or username %q is already in use",
+				"starterapp: cannot neutralize bootstrap administrator: email %q or username %q is already in use",
 				replacementEmail,
 				replacementName,
 			)
@@ -234,110 +457,44 @@ func migrateBootstrapIdentity(
 	}
 
 	now := time.Now().UTC()
-	updates := []struct {
-		name  string
-		query string
-		args  []any
-	}{
-		{
-			name: "sessions",
-			query: `UPDATE auth_sessions
-				SET tenant_id = ?,
-				    user_id = CASE WHEN user_id = ? THEN ? ELSE user_id END
-				WHERE tenant_id = ?`,
-			args: []any{seed.TenantID, legacyBootstrapUserID, seed.UserID, legacyBootstrapTenantID},
-		},
-		{
-			name: "API keys",
-			query: `UPDATE api_keys
-				SET tenant_id = ?,
-				    user_id = CASE WHEN user_id = ? THEN ? ELSE user_id END
-				WHERE tenant_id = ?`,
-			args: []any{seed.TenantID, legacyBootstrapUserID, seed.UserID, legacyBootstrapTenantID},
-		},
-		{
-			name: "audit events",
-			query: `UPDATE audit_events
-				SET tenant_id = ?,
-				    actor = CASE WHEN actor = ? THEN ? ELSE actor END
-				WHERE tenant_id = ?`,
-			args: []any{seed.TenantID, legacyBootstrapUserID, seed.UserID, legacyBootstrapTenantID},
-		},
-		{
-			name: "content",
-			query: `UPDATE content
-				SET tenant_id = ?,
-				    author_id = CASE WHEN author_id = ? THEN ? ELSE author_id END
-				WHERE tenant_id = ?`,
-			args: []any{seed.TenantID, legacyBootstrapUserID, seed.UserID, legacyBootstrapTenantID},
-		},
-		{
-			name: "notifications",
-			query: `UPDATE notifications
-				SET tenant_id = ?,
-				    user_id = CASE WHEN user_id = ? THEN ? ELSE user_id END
-				WHERE tenant_id = ?`,
-			args: []any{seed.TenantID, legacyBootstrapUserID, seed.UserID, legacyBootstrapTenantID},
-		},
-		{
-			name: "notification subscriptions",
-			query: `UPDATE notification_subscriptions
-				SET tenant_id = ?,
-				    user_id = CASE WHEN user_id = ? THEN ? ELSE user_id END
-				WHERE tenant_id = ?`,
-			args: []any{seed.TenantID, legacyBootstrapUserID, seed.UserID, legacyBootstrapTenantID},
-		},
-		{
-			name: "users",
-			query: `UPDATE users
-				SET tenant_id = ?,
-				    id = CASE WHEN id = ? THEN ? ELSE id END,
-				    email = CASE WHEN id = ? THEN ? ELSE email END,
-				    username = CASE WHEN id = ? THEN ? ELSE username END,
-				    display_name = CASE WHEN id = ? THEN ? ELSE display_name END,
-				    pass_hash = CASE WHEN id = ? THEN ? ELSE pass_hash END
-				WHERE tenant_id = ?`,
-			args: []any{
-				seed.TenantID,
-				legacyBootstrapUserID, seed.UserID,
-				legacyBootstrapUserID, replacementEmail,
-				legacyBootstrapUserID, replacementName,
-				legacyBootstrapUserID, replacementDisplay,
-				legacyBootstrapUserID, replacementPassHash,
-				legacyBootstrapTenantID,
-			},
-		},
-		{
-			name: "tenant",
-			query: `UPDATE tenants
-				SET id = ?,
-				    slug = CASE WHEN slug = ? THEN ? ELSE slug END,
-				    name = CASE WHEN name = ? THEN ? ELSE name END
-				WHERE id = ?`,
-			args: []any{
-				seed.TenantID,
-				legacyBootstrapTenantSlug, seed.TenantSlug,
-				legacyBootstrapTenantName, seed.TenantName,
-				legacyBootstrapTenantID,
-			},
-		},
+	if legacyTenantExists {
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE tenants SET slug = ?, name = ? WHERE id = ?`,
+			replacementSlug,
+			replacementTenantName,
+			legacyBootstrapTenantID,
+		); err != nil {
+			return fmt.Errorf("starterapp: neutralize bootstrap tenant labels: %w", err)
+		}
+	}
+	if legacyUserExists {
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE users
+			 SET email = ?, username = ?, display_name = ?, pass_hash = ?
+			 WHERE id = ? AND tenant_id = ?`,
+			replacementEmail,
+			replacementName,
+			replacementDisplay,
+			replacementPassHash,
+			identity.UserID,
+			identity.TenantID,
+		); err != nil {
+			return fmt.Errorf("starterapp: neutralize bootstrap administrator labels: %w", err)
+		}
 	}
 	if legacyPasswordWasDefault {
-		updates = append(updates, struct {
-			name  string
-			query string
-			args  []any
-		}{
-			name: "sessions issued under the historical default password",
-			query: `UPDATE auth_sessions
-				SET revoked_at = ?
-				WHERE tenant_id = ? AND user_id = ? AND revoked_at IS NULL`,
-			args: []any{now, seed.TenantID, seed.UserID},
-		})
-	}
-	for _, update := range updates {
-		if _, err := tx.ExecContext(ctx, update.query, update.args...); err != nil {
-			return fmt.Errorf("starterapp: migrate bootstrap %s: %w", update.name, err)
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE auth_sessions
+			 SET revoked_at = ?
+			 WHERE tenant_id = ? AND user_id = ? AND revoked_at IS NULL`,
+			now,
+			identity.TenantID,
+			identity.UserID,
+		); err != nil {
+			return fmt.Errorf("starterapp: revoke sessions issued under the released bootstrap password: %w", err)
 		}
 	}
 

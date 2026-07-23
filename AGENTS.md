@@ -13,7 +13,10 @@ front door is [septagon-oss/platformkit](https://github.com/septagon-oss/platfor
   architecture.
 - `pkg/starterapp/bootstrap_migration.go` contains historical bootstrap
   literals solely to migrate durable state. They are not current defaults or
-  alternate product examples.
+  alternate product examples. Upgrades preserve released tenant/user IDs
+  because downstream module tables may reference them; only visible defaults
+  are neutralized. Never rename those durable keys without a downstream-aware
+  migration contract.
 
 Do not create app binaries, teaching bundles, sample products, client modules,
 or alternate composition paths in this repository. Product-specific code

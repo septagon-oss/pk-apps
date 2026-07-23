@@ -99,6 +99,7 @@ type App struct {
 	appName       string
 	appVersion    string
 	environment   string
+	seedTenantID  string
 	seedEmail     string
 	seedPassword  string
 
@@ -186,6 +187,17 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		}
 	}()
 
+	seedParams, err := resolveSeedParams(cfg)
+	if err != nil {
+		return nil, err
+	}
+	bootstrapIDs, err := resolveBootstrapIdentity(ctx, db, seedParams.AdminEmail)
+	if err != nil {
+		return nil, err
+	}
+	seedParams.TenantID = bootstrapIDs.TenantID
+	seedParams.UserID = bootstrapIDs.UserID
+
 	// 1. Admin shell first — every other module wires AdminRegistrar into it.
 	adminMod, err := admin.NewModule(
 		admin.WithTitle(cfg.AppName+" Admin"),
@@ -238,9 +250,10 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit module: %w", err)
 	}
-	// The system-level audit emitter is bound to the seed tenant and a
-	// synthetic actor so cross-cutting events have stable provenance.
-	auditEmitter := audit.EmitterFor(auditMod.Service(), seed.TenantID, "system", "info")
+	// The system-level audit emitter is bound to the database's durable
+	// bootstrap tenant and a synthetic actor. Upgrades may preserve a released
+	// tenant ID so contributed-module rows never become orphaned.
+	auditEmitter := audit.EmitterFor(auditMod.Service(), bootstrapIDs.TenantID, "system", "info")
 
 	// 6. Auth_management — requires user_management's UserBoundaryReader.
 	authMod, err := auth.NewModule(
@@ -290,16 +303,13 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		return nil, fmt.Errorf("notification module: %w", err)
 	}
 
-	seedParams, err := resolveSeedParams(cfg)
-	if err != nil {
-		return nil, err
-	}
 	if err := migrateBootstrapIdentity(
 		ctx,
 		db,
 		userMod.Hasher(),
 		seedParams.AdminEmail,
 		seedParams.AdminPassword,
+		bootstrapIDs,
 	); err != nil {
 		return nil, err
 	}
@@ -318,7 +328,7 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	if _, err := seed.Run(ctx, tenantMod.Service(), userMod.Service(), seedParams); err != nil {
 		return nil, fmt.Errorf("seed: %w", err)
 	}
-	seededAdmin, err := userMod.Service().Get(ctx, seed.TenantID, seed.UserID)
+	seededAdmin, err := userMod.Service().Get(ctx, bootstrapIDs.TenantID, bootstrapIDs.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("seed: resolve admin identity: %w", err)
 	}
@@ -442,6 +452,7 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		appName:           cfg.AppName,
 		appVersion:        cfg.AppVersion,
 		environment:       cfg.Environment,
+		seedTenantID:      bootstrapIDs.TenantID,
 		extra:             extraPlugins,
 		openAPIOperations: openAPIOperations,
 	}
@@ -599,8 +610,10 @@ func (a *App) AllModuleIDs() []string {
 // AdminBasePath is the mount path of the admin shell (e.g. "/admin").
 func (a *App) AdminBasePath() string { return a.adminBasePath }
 
-// SeedEmail and SeedPassword are the advertised first-boot credentials, exposed
-// so a wrapper's banner prints the exact login the seed created.
+// SeedTenantID, SeedEmail, and SeedPassword are the advertised first-boot
+// credentials, exposed so a wrapper's banner prints the exact login the seed
+// created.
+func (a *App) SeedTenantID() string { return a.seedTenantID }
 func (a *App) SeedEmail() string    { return a.seedEmail }
 func (a *App) SeedPassword() string { return a.seedPassword }
 
