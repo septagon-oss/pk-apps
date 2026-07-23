@@ -14,6 +14,7 @@ package starterapp
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
 )
@@ -24,9 +25,15 @@ import (
 // is REQUIRED and the password is never re-asserted, so an operator's changed
 // credential survives a restart.
 func resolveSeedParams(cfg *Config) (seed.Params, error) {
-	email := cfg.Seed.AdminEmail
+	email := strings.TrimSpace(cfg.Seed.AdminEmail)
+	if cfg.Seed.AdminEmail != "" && email == "" {
+		return seed.Params{}, fmt.Errorf("starterapp: seed.admin_email must not be blank")
+	}
 	if email == "" {
 		email = seed.UserEmail
+	}
+	if !strings.Contains(email, "@") {
+		return seed.Params{}, fmt.Errorf("starterapp: seed.admin_email %q must contain '@'", email)
 	}
 	dev := cfg.Environment == "development"
 	password := cfg.Seed.AdminPassword

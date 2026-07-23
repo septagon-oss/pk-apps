@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
@@ -123,20 +124,6 @@ func resolveBootstrapIdentity(
 	if err != nil {
 		return bootstrapIdentity{}, fmt.Errorf("starterapp: inspect released bootstrap tenant: %w", err)
 	}
-	currentTenantExists, err := rowExists(
-		`SELECT COUNT(*) FROM tenants WHERE id = ?`,
-		seed.TenantID,
-	)
-	if err != nil {
-		return bootstrapIdentity{}, fmt.Errorf("starterapp: inspect current bootstrap tenant: %w", err)
-	}
-	if legacyTenantExists && currentTenantExists {
-		return bootstrapIdentity{}, fmt.Errorf(
-			"starterapp: ambiguous bootstrap state: both released tenant %q and current tenant %q exist",
-			legacyBootstrapTenantID,
-			seed.TenantID,
-		)
-	}
 
 	legacyUserTenant, legacyUserExists, err := userTenant(legacyBootstrapUserID)
 	if err != nil {
@@ -149,27 +136,18 @@ func resolveBootstrapIdentity(
 
 	if legacyTenantExists {
 		legacyUserBelongsToTenant := legacyUserExists && legacyUserTenant == legacyBootstrapTenantID
-		currentUserBelongsToTenant := currentUserExists && currentUserTenant == legacyBootstrapTenantID
-		if legacyUserBelongsToTenant && currentUserBelongsToTenant {
-			return bootstrapIdentity{}, fmt.Errorf(
-				"starterapp: ambiguous bootstrap state: both released administrator %q and current administrator %q exist",
-				legacyBootstrapUserID,
-				seed.UserID,
-			)
-		}
 		if legacyUserBelongsToTenant {
 			return bootstrapIdentity{
 				TenantID: legacyBootstrapTenantID,
 				UserID:   legacyBootstrapUserID,
 			}, nil
 		}
-		if currentUserBelongsToTenant {
-			return bootstrapIdentity{
-				TenantID: legacyBootstrapTenantID,
-				UserID:   seed.UserID,
-			}, nil
-		}
 
+		// A replacement bootstrap administrator may have been provisioned
+		// under an application-owned ID. Resolve that identity by the released
+		// or configured email before considering the newly introduced default
+		// ID: previous releases did not reserve seed.UserID, so an unrelated
+		// account may legitimately own it.
 		rows, err := db.QueryContext(
 			ctx,
 			`SELECT id
@@ -195,6 +173,9 @@ func resolveBootstrapIdentity(
 		if err := rows.Err(); err != nil {
 			return bootstrapIdentity{}, fmt.Errorf("starterapp: list prior email-keyed administrators: %w", err)
 		}
+		if err := rows.Close(); err != nil {
+			return bootstrapIdentity{}, fmt.Errorf("starterapp: close prior administrator lookup: %w", err)
+		}
 		switch len(emailKeyedIDs) {
 		case 1:
 			return bootstrapIdentity{
@@ -213,15 +194,28 @@ func resolveBootstrapIdentity(
 			)
 		}
 
-		if currentUserExists {
-			return bootstrapIdentity{}, fmt.Errorf(
-				"starterapp: current bootstrap administrator ID %q belongs to tenant %q, not preserved tenant %q",
-				seed.UserID,
-				currentUserTenant,
-				legacyBootstrapTenantID,
-			)
+		// No released administrator survived (for example, a partial old
+		// bootstrap created only the tenant). Select an unused neutral ID for
+		// the new administrator instead of granting privileges to an account
+		// that happens to own the now-default ID.
+		candidate := seed.UserID
+		for suffix := 0; ; suffix++ {
+			exists, lookupErr := rowExists(`SELECT COUNT(*) FROM users WHERE id = ?`, candidate)
+			if lookupErr != nil {
+				return bootstrapIdentity{}, fmt.Errorf("starterapp: select bootstrap administrator ID: %w", lookupErr)
+			}
+			if !exists {
+				return bootstrapIdentity{
+					TenantID: legacyBootstrapTenantID,
+					UserID:   candidate,
+				}, nil
+			}
+			if suffix == 0 {
+				candidate = seed.UserID + "_bootstrap"
+				continue
+			}
+			candidate = fmt.Sprintf("%s_bootstrap_%d", seed.UserID, suffix+1)
 		}
-		return bootstrapIdentity{TenantID: legacyBootstrapTenantID, UserID: seed.UserID}, nil
 	}
 
 	if legacyUserExists {
@@ -383,25 +377,88 @@ func migrateBootstrapIdentity(
 		}
 		return count, nil
 	}
+	availableTenantSlug := func(preferred string) (string, error) {
+		candidate := preferred
+		for suffix := 0; ; suffix++ {
+			count, err := countRows(
+				`SELECT COUNT(*) FROM tenants WHERE slug = ? AND id <> ?`,
+				candidate,
+				identity.TenantID,
+			)
+			if err != nil {
+				return "", err
+			}
+			if count == 0 {
+				return candidate, nil
+			}
+			if suffix == 0 {
+				candidate = "platformkit-local"
+				continue
+			}
+			candidate = fmt.Sprintf("platformkit-local-%d", suffix+1)
+		}
+	}
+	availableUsername := func(preferred string) (string, error) {
+		candidate := preferred
+		for suffix := 0; ; suffix++ {
+			count, err := countRows(
+				`SELECT COUNT(*)
+				 FROM users
+				 WHERE tenant_id = ? AND username = ? AND id <> ?`,
+				identity.TenantID,
+				candidate,
+				identity.UserID,
+			)
+			if err != nil {
+				return "", err
+			}
+			if count == 0 {
+				return candidate, nil
+			}
+			if suffix == 0 {
+				candidate = "platformkit-operator"
+				continue
+			}
+			candidate = fmt.Sprintf("platformkit-operator-%d", suffix+1)
+		}
+	}
+	availableEmail := func(preferred string) (string, error) {
+		at := strings.LastIndex(preferred, "@")
+		if at <= 0 || at == len(preferred)-1 {
+			return "", fmt.Errorf("configured bootstrap email %q is invalid", preferred)
+		}
+		local, domain := preferred[:at], preferred[at+1:]
+		candidate := preferred
+		for suffix := 0; ; suffix++ {
+			count, err := countRows(
+				`SELECT COUNT(*)
+				 FROM users
+				 WHERE tenant_id = ? AND email = ? AND id <> ?`,
+				identity.TenantID,
+				candidate,
+				identity.UserID,
+			)
+			if err != nil {
+				return "", err
+			}
+			if count == 0 {
+				return candidate, nil
+			}
+			if suffix == 0 {
+				candidate = local + "+platformkit@" + domain
+				continue
+			}
+			candidate = fmt.Sprintf("%s+platformkit-%d@%s", local, suffix+1, domain)
+		}
+	}
 
 	replacementSlug := legacyTenantSlug
 	replacementTenantName := legacyTenantName
 	if legacyTenantExists {
 		if legacyTenantSlug == legacyBootstrapTenantSlug {
-			replacementSlug = seed.TenantSlug
-			count, err := countRows(
-				`SELECT COUNT(*) FROM tenants WHERE slug = ? AND id <> ?`,
-				replacementSlug,
-				legacyBootstrapTenantID,
-			)
+			replacementSlug, err = availableTenantSlug(seed.TenantSlug)
 			if err != nil {
 				return fmt.Errorf("starterapp: inspect replacement bootstrap slug: %w", err)
-			}
-			if count != 0 {
-				return fmt.Errorf(
-					"starterapp: cannot neutralize bootstrap tenant: slug %q already exists",
-					replacementSlug,
-				)
 			}
 		}
 		if legacyTenantName == legacyBootstrapTenantName {
@@ -416,35 +473,19 @@ func migrateBootstrapIdentity(
 	legacyPasswordWasDefault := false
 	if legacyUserExists {
 		if legacyUserEmail == legacyBootstrapUserEmail {
-			replacementEmail = adminEmail
+			replacementEmail, err = availableEmail(adminEmail)
+			if err != nil {
+				return fmt.Errorf("starterapp: select replacement bootstrap email: %w", err)
+			}
 		}
 		if legacyUserName == legacyBootstrapUserName {
-			replacementName = seed.UserName
+			replacementName, err = availableUsername(seed.UserName)
+			if err != nil {
+				return fmt.Errorf("starterapp: select replacement bootstrap username: %w", err)
+			}
 		}
 		if legacyUserDisplay == legacyBootstrapUserDisplay {
 			replacementDisplay = seed.UserDisplay
-		}
-
-		count, err := countRows(
-			`SELECT COUNT(*)
-			 FROM users
-			 WHERE id <> ?
-			   AND tenant_id = ?
-			   AND (email = ? OR username = ?)`,
-			identity.UserID,
-			identity.TenantID,
-			replacementEmail,
-			replacementName,
-		)
-		if err != nil {
-			return fmt.Errorf("starterapp: inspect bootstrap administrator identity conflicts: %w", err)
-		}
-		if count != 0 {
-			return fmt.Errorf(
-				"starterapp: cannot neutralize bootstrap administrator: email %q or username %q is already in use",
-				replacementEmail,
-				replacementName,
-			)
 		}
 
 		if hasher.Verify(legacyBootstrapUserPassword, legacyPassHash) == nil {

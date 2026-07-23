@@ -436,6 +436,235 @@ func TestBootstrapMigrationFindsPriorEmailKeyedReplacementAdministrator(t *testi
 	}
 }
 
+func TestBootstrapMigrationDoesNotGrantAdminToNewIDCollision(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	hasher, err := passhash.NewBcrypt(passhash.MinCost)
+	if err != nil {
+		t.Fatalf("create collision password hasher: %v", err)
+	}
+	ordinaryPassword := "ordinary-user-password"
+	ordinaryHash, err := hasher.Hash(ordinaryPassword)
+	if err != nil {
+		t.Fatalf("hash ordinary password: %v", err)
+	}
+
+	const replacementUserID = "customer_owner"
+	cfg.Environment = "production"
+	cfg.Seed.AdminEmail = "owner@customer.test"
+	cfg.Seed.AdminPassword = "replacement-owner-password"
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open user-ID collision fixture: %v", err)
+	}
+	now := time.Now().UTC()
+	updates := []string{
+		`UPDATE users SET id = '` + replacementUserID + `', email = '` + cfg.Seed.AdminEmail + `' WHERE id = '` + releasedBootstrapUserID + `'`,
+		`UPDATE auth_sessions SET user_id = '` + replacementUserID + `' WHERE user_id = '` + releasedBootstrapUserID + `'`,
+		`UPDATE api_keys SET user_id = '` + replacementUserID + `' WHERE user_id = '` + releasedBootstrapUserID + `'`,
+		`UPDATE audit_events SET actor = '` + replacementUserID + `' WHERE actor = '` + releasedBootstrapUserID + `'`,
+		`UPDATE content SET author_id = '` + replacementUserID + `' WHERE author_id = '` + releasedBootstrapUserID + `'`,
+		`UPDATE notifications SET user_id = '` + replacementUserID + `' WHERE user_id = '` + releasedBootstrapUserID + `'`,
+		`UPDATE notification_subscriptions SET user_id = '` + replacementUserID + `' WHERE user_id = '` + releasedBootstrapUserID + `'`,
+		`UPDATE extension_assets SET owner_id = '` + replacementUserID + `' WHERE owner_id = '` + releasedBootstrapUserID + `'`,
+	}
+	for _, update := range updates {
+		if _, err := db.ExecContext(ctx, update); err != nil {
+			t.Fatalf("replace bootstrap administrator references: %v", err)
+		}
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO users
+		 (id, tenant_id, email, username, pass_hash, display_name, active, created_at, updated_at)
+		 VALUES (?, ?, 'ordinary@customer.test', 'ordinary', ?, 'Ordinary User', 1, ?, ?)`,
+		seed.UserID,
+		releasedBootstrapTenantID,
+		ordinaryHash,
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("insert colliding ordinary user: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close user-ID collision fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() with user-ID collision: %v", err)
+	}
+	defer app.Close()
+
+	if app.adminSubject != replacementUserID {
+		t.Fatalf("adminSubject = %q, want email-keyed owner %q", app.adminSubject, replacementUserID)
+	}
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		releasedBootstrapTenantID,
+		seed.UserID,
+		ordinaryPassword,
+	); err != nil {
+		t.Fatalf("ordinary account password changed: %v", err)
+	}
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		releasedBootstrapTenantID,
+		seed.UserID,
+		cfg.Seed.AdminPassword,
+	); err == nil {
+		t.Fatal("ordinary account received the bootstrap administrator password")
+	}
+	if _, err := app.authMod.Service().Login(ctx, releasedBootstrapTenantID, auth.Credentials{
+		Email:    cfg.Seed.AdminEmail,
+		Password: cfg.Seed.AdminPassword,
+	}); err != nil {
+		t.Fatalf("email-keyed owner login: %v", err)
+	}
+}
+
+func TestBootstrapMigrationPrefersReleasedTenantOverNewIDCollision(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open tenant-ID collision fixture: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO tenants (id, slug, name, created_at, updated_at)
+		 VALUES (?, 'customer-local', 'Existing Customer Tenant', ?, ?)`,
+		seed.TenantID,
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("insert colliding tenant: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close tenant-ID collision fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() with tenant-ID collision: %v", err)
+	}
+	defer app.Close()
+
+	if app.seedTenantID != releasedBootstrapTenantID {
+		t.Fatalf("seedTenantID = %q, want released tenant %q", app.seedTenantID, releasedBootstrapTenantID)
+	}
+	collidingTenant, err := app.tenant.Service().Get(ctx, seed.TenantID)
+	if err != nil {
+		t.Fatalf("lookup colliding tenant: %v", err)
+	}
+	if collidingTenant.Slug != "customer-local" || collidingTenant.Name != "Existing Customer Tenant" {
+		t.Fatalf(
+			"colliding tenant changed to slug=%q name=%q",
+			collidingTenant.Slug,
+			collidingTenant.Name,
+		)
+	}
+}
+
+func TestBootstrapMigrationChoosesNonconflictingNeutralLabels(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	hasher, err := passhash.NewBcrypt(passhash.MinCost)
+	if err != nil {
+		t.Fatalf("create label-collision password hasher: %v", err)
+	}
+	ordinaryHash, err := hasher.Hash("ordinary-user-password")
+	if err != nil {
+		t.Fatalf("hash label-collision password: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open label-collision fixture: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO tenants (id, slug, name, created_at, updated_at)
+		 VALUES ('tenant_existing_local', ?, 'Existing Local Tenant', ?, ?)`,
+		seed.TenantSlug,
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("insert colliding tenant slug: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO users
+		 (id, tenant_id, email, username, pass_hash, display_name, active, created_at, updated_at)
+		 VALUES ('existing_operator', ?, ?, ?, ?, 'Existing Operator', 1, ?, ?)`,
+		releasedBootstrapTenantID,
+		seed.UserEmail,
+		seed.UserName,
+		ordinaryHash,
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("insert colliding user labels: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close label-collision fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() with label collisions: %v", err)
+	}
+	defer app.Close()
+
+	migratedTenant, err := app.tenant.Service().Get(ctx, releasedBootstrapTenantID)
+	if err != nil {
+		t.Fatalf("lookup migrated tenant: %v", err)
+	}
+	if migratedTenant.Slug != "platformkit-local" {
+		t.Fatalf("migrated tenant slug = %q, want collision-safe neutral slug", migratedTenant.Slug)
+	}
+	migratedAdmin, err := app.user.Service().Get(
+		ctx,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+	)
+	if err != nil {
+		t.Fatalf("lookup migrated administrator: %v", err)
+	}
+	if migratedAdmin.Email != "operator+platformkit@local.test" {
+		t.Fatalf("migrated administrator email = %q, want collision-safe neutral email", migratedAdmin.Email)
+	}
+	if migratedAdmin.Username != "platformkit-operator" {
+		t.Fatalf("migrated administrator username = %q, want collision-safe neutral username", migratedAdmin.Username)
+	}
+	if _, err := app.authMod.Service().Login(ctx, releasedBootstrapTenantID, auth.Credentials{
+		Email:    migratedAdmin.Email,
+		Password: seed.UserPass,
+	}); err != nil {
+		t.Fatalf("collision-safe administrator login: %v", err)
+	}
+	if app.seedEmail != migratedAdmin.Email {
+		t.Fatalf("development banner email = %q, want %q", app.seedEmail, migratedAdmin.Email)
+	}
+
+	ordinary, err := app.user.Service().Get(ctx, releasedBootstrapTenantID, "existing_operator")
+	if err != nil {
+		t.Fatalf("lookup existing operator: %v", err)
+	}
+	if ordinary.Email != seed.UserEmail || ordinary.Username != seed.UserName {
+		t.Fatalf("existing operator labels changed to email=%q username=%q", ordinary.Email, ordinary.Username)
+	}
+}
+
 func createLegacyBootstrapFixture(t *testing.T, dsn string) {
 	t.Helper()
 

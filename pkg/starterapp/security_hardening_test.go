@@ -65,6 +65,19 @@ func TestResolveSeedParamsFailsClosedOutsideDevelopment(t *testing.T) {
 	if prod.RepairPassword {
 		t.Fatal("production must never repair (re-assert) the password")
 	}
+
+	for _, email := range []string{"   ", "missing-at-sign"} {
+		_, err := resolveSeedParams(&Config{
+			Environment: "production",
+			Seed: SeedConfig{
+				AdminEmail:    email,
+				AdminPassword: "strong-pw",
+			},
+		})
+		if err == nil {
+			t.Fatalf("invalid seed.admin_email %q must error before migration", email)
+		}
+	}
 }
 
 // TestLoadConfigOmittedEnvironmentFailsClosed proves the fail-open foot-gun is
