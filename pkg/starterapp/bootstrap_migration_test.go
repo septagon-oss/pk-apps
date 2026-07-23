@@ -26,6 +26,20 @@ import (
 	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
 )
 
+// Keep this fixture independent from bootstrap_migration.go. These are the
+// exact values published by v0.1.0 through v0.3.1; deriving the fixture from
+// migration constants would let an incorrect migration test itself green.
+const (
+	releasedBootstrapTenantID     = "tenant_acme"
+	releasedBootstrapTenantSlug   = "acme"
+	releasedBootstrapTenantName   = "Acme Inc"
+	releasedBootstrapUserID       = "user_admin"
+	releasedBootstrapUserEmail    = "admin@local.test"
+	releasedBootstrapUserName     = "admin"
+	releasedBootstrapUserDisplay  = "Demo Admin"
+	releasedBootstrapUserPassword = "changeme"
+)
+
 func TestBuildAppMigratesLegacyBootstrapIdentityAndOwnedData(t *testing.T) {
 	ctx := context.Background()
 	cfg := freshConfig(t)
@@ -36,12 +50,35 @@ func TestBuildAppMigratesLegacyBootstrapIdentityAndOwnedData(t *testing.T) {
 		t.Fatalf("BuildApp() migration error = %v", err)
 	}
 
+	migratedTenant, err := app.tenant.Service().Get(ctx, seed.TenantID)
+	if err != nil {
+		t.Fatalf("migrated tenant lookup: %v", err)
+	}
+	if migratedTenant.Slug != seed.TenantSlug || migratedTenant.Name != seed.TenantName {
+		t.Fatalf(
+			"migrated tenant = slug %q name %q, want slug %q name %q",
+			migratedTenant.Slug,
+			migratedTenant.Name,
+			seed.TenantSlug,
+			seed.TenantName,
+		)
+	}
+
 	adminUser, err := app.user.Service().Get(ctx, seed.TenantID, seed.UserID)
 	if err != nil {
 		t.Fatalf("migrated administrator lookup: %v", err)
 	}
 	if adminUser.Email != seed.UserEmail {
 		t.Fatalf("migrated administrator email = %q, want %q", adminUser.Email, seed.UserEmail)
+	}
+	if adminUser.Username != seed.UserName || adminUser.DisplayName != seed.UserDisplay {
+		t.Fatalf(
+			"migrated administrator = username %q display %q, want username %q display %q",
+			adminUser.Username,
+			adminUser.DisplayName,
+			seed.UserName,
+			seed.UserDisplay,
+		)
 	}
 	if app.adminSubject != seed.UserID {
 		t.Fatalf("adminSubject = %q, want %q", app.adminSubject, seed.UserID)
@@ -58,14 +95,14 @@ func TestBuildAppMigratesLegacyBootstrapIdentityAndOwnedData(t *testing.T) {
 		ctx,
 		seed.TenantID,
 		seed.UserID,
-		legacyBootstrapUserPassword,
+		releasedBootstrapUserPassword,
 	); err == nil {
 		t.Fatal("historical bootstrap password still verifies after migration")
 	}
 
-	if _, err := app.authMod.Service().Login(ctx, legacyBootstrapTenantID, auth.Credentials{
-		Email:    legacyBootstrapUserEmail,
-		Password: legacyBootstrapUserPassword,
+	if _, err := app.authMod.Service().Login(ctx, releasedBootstrapTenantID, auth.Credentials{
+		Email:    releasedBootstrapUserEmail,
+		Password: releasedBootstrapUserPassword,
 	}); err == nil {
 		t.Fatal("historical bootstrap login still succeeds after migration")
 	}
@@ -187,7 +224,7 @@ func TestBootstrapMigrationPreservesCustomizedProductionIdentity(t *testing.T) {
 		ctx,
 		`UPDATE tenants SET slug = 'customer-workspace', name = 'Customer Workspace'
 		 WHERE id = ?`,
-		legacyBootstrapTenantID,
+		releasedBootstrapTenantID,
 	); err != nil {
 		t.Fatalf("customize fixture tenant: %v", err)
 	}
@@ -200,8 +237,8 @@ func TestBootstrapMigrationPreservesCustomizedProductionIdentity(t *testing.T) {
 		     pass_hash = ?
 		 WHERE id = ? AND tenant_id = ?`,
 		customHash,
-		legacyBootstrapUserID,
-		legacyBootstrapTenantID,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
 	); err != nil {
 		t.Fatalf("customize fixture administrator: %v", err)
 	}
@@ -307,7 +344,7 @@ func createLegacyBootstrapFixture(t *testing.T, dsn string) {
 	if err != nil {
 		t.Fatalf("create fixture password hasher: %v", err)
 	}
-	legacyHash, err := hasher.Hash(legacyBootstrapUserPassword)
+	legacyHash, err := hasher.Hash(releasedBootstrapUserPassword)
 	if err != nil {
 		t.Fatalf("hash fixture password: %v", err)
 	}
@@ -322,7 +359,7 @@ func createLegacyBootstrapFixture(t *testing.T, dsn string) {
 		{
 			"tenant",
 			`INSERT INTO tenants (id, slug, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
-			[]any{legacyBootstrapTenantID, legacyBootstrapTenantSlug, legacyBootstrapTenantName, now, now},
+			[]any{releasedBootstrapTenantID, releasedBootstrapTenantSlug, releasedBootstrapTenantName, now, now},
 		},
 		{
 			"user",
@@ -330,12 +367,12 @@ func createLegacyBootstrapFixture(t *testing.T, dsn string) {
 			 (id, tenant_id, email, username, pass_hash, display_name, active, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
 			[]any{
-				legacyBootstrapUserID,
-				legacyBootstrapTenantID,
-				legacyBootstrapUserEmail,
-				legacyBootstrapUserName,
+				releasedBootstrapUserID,
+				releasedBootstrapTenantID,
+				releasedBootstrapUserEmail,
+				releasedBootstrapUserName,
 				legacyHash,
-				legacyBootstrapUserDisplay,
+				releasedBootstrapUserDisplay,
 				now,
 				now,
 			},
@@ -345,42 +382,42 @@ func createLegacyBootstrapFixture(t *testing.T, dsn string) {
 			`INSERT INTO auth_sessions
 			 (id, user_id, tenant_id, issued_at, expires_at, revoked_at)
 			 VALUES ('session_existing', ?, ?, ?, ?, NULL)`,
-			[]any{legacyBootstrapUserID, legacyBootstrapTenantID, now, expires},
+			[]any{releasedBootstrapUserID, releasedBootstrapTenantID, now, expires},
 		},
 		{
 			"API key",
 			`INSERT INTO api_keys
 			 (id, tenant_id, user_id, name, prefix, hash, scopes, last_used_at, revoked_at, expires_at, created_at)
 			 VALUES ('key_existing', ?, ?, 'existing', 'pk_existing', 'hash', 'content:read', NULL, NULL, NULL, ?)`,
-			[]any{legacyBootstrapTenantID, legacyBootstrapUserID, now},
+			[]any{releasedBootstrapTenantID, releasedBootstrapUserID, now},
 		},
 		{
 			"audit event",
 			`INSERT INTO audit_events
 			 (id, tenant_id, actor, action, resource, severity, details, emitted_at)
 			 VALUES ('audit_existing', ?, ?, 'created', 'content', 'info', 'preserve me', ?)`,
-			[]any{legacyBootstrapTenantID, legacyBootstrapUserID, now},
+			[]any{releasedBootstrapTenantID, releasedBootstrapUserID, now},
 		},
 		{
 			"content",
 			`INSERT INTO content
 			 (id, tenant_id, kind, slug, title, body, body_format, author_id, published_at, created_at, updated_at)
 			 VALUES ('content_existing', ?, 'post', 'existing', 'Existing', 'preserve me', 'markdown', ?, NULL, ?, ?)`,
-			[]any{legacyBootstrapTenantID, legacyBootstrapUserID, now, now},
+			[]any{releasedBootstrapTenantID, releasedBootstrapUserID, now, now},
 		},
 		{
 			"notification",
 			`INSERT INTO notifications
 			 (id, tenant_id, user_id, title, body, category, severity, data, read_at, emitted_at)
 			 VALUES ('notification_existing', ?, ?, 'Existing', 'preserve me', 'system', 'info', '{}', NULL, ?)`,
-			[]any{legacyBootstrapTenantID, legacyBootstrapUserID, now},
+			[]any{releasedBootstrapTenantID, releasedBootstrapUserID, now},
 		},
 		{
 			"notification subscription",
 			`INSERT INTO notification_subscriptions
 			 (id, tenant_id, user_id, category, channel, created_at)
 			 VALUES ('subscription_existing', ?, ?, 'system', 'in_app', ?)`,
-			[]any{legacyBootstrapTenantID, legacyBootstrapUserID, now},
+			[]any{releasedBootstrapTenantID, releasedBootstrapUserID, now},
 		},
 	}
 	for _, insert := range inserts {
@@ -398,16 +435,16 @@ func assertNoLegacyBootstrapReferences(t *testing.T, db *sql.DB, expectedSession
 		query string
 		args  []any
 	}{
-		{"tenant ID", `SELECT COUNT(*) FROM tenants WHERE id = ?`, []any{legacyBootstrapTenantID}},
-		{"tenant slug", `SELECT COUNT(*) FROM tenants WHERE slug = ?`, []any{legacyBootstrapTenantSlug}},
-		{"user ID", `SELECT COUNT(*) FROM users WHERE id = ?`, []any{legacyBootstrapUserID}},
-		{"user tenant", `SELECT COUNT(*) FROM users WHERE tenant_id = ?`, []any{legacyBootstrapTenantID}},
-		{"session identity", `SELECT COUNT(*) FROM auth_sessions WHERE tenant_id = ? OR user_id = ?`, []any{legacyBootstrapTenantID, legacyBootstrapUserID}},
-		{"API key identity", `SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? OR user_id = ?`, []any{legacyBootstrapTenantID, legacyBootstrapUserID}},
-		{"audit identity", `SELECT COUNT(*) FROM audit_events WHERE tenant_id = ? OR actor = ?`, []any{legacyBootstrapTenantID, legacyBootstrapUserID}},
-		{"content identity", `SELECT COUNT(*) FROM content WHERE tenant_id = ? OR author_id = ?`, []any{legacyBootstrapTenantID, legacyBootstrapUserID}},
-		{"notification identity", `SELECT COUNT(*) FROM notifications WHERE tenant_id = ? OR user_id = ?`, []any{legacyBootstrapTenantID, legacyBootstrapUserID}},
-		{"subscription identity", `SELECT COUNT(*) FROM notification_subscriptions WHERE tenant_id = ? OR user_id = ?`, []any{legacyBootstrapTenantID, legacyBootstrapUserID}},
+		{"tenant ID", `SELECT COUNT(*) FROM tenants WHERE id = ?`, []any{releasedBootstrapTenantID}},
+		{"tenant slug", `SELECT COUNT(*) FROM tenants WHERE slug = ?`, []any{releasedBootstrapTenantSlug}},
+		{"user ID", `SELECT COUNT(*) FROM users WHERE id = ?`, []any{releasedBootstrapUserID}},
+		{"user tenant", `SELECT COUNT(*) FROM users WHERE tenant_id = ?`, []any{releasedBootstrapTenantID}},
+		{"session identity", `SELECT COUNT(*) FROM auth_sessions WHERE tenant_id = ? OR user_id = ?`, []any{releasedBootstrapTenantID, releasedBootstrapUserID}},
+		{"API key identity", `SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? OR user_id = ?`, []any{releasedBootstrapTenantID, releasedBootstrapUserID}},
+		{"audit identity", `SELECT COUNT(*) FROM audit_events WHERE tenant_id = ? OR actor = ?`, []any{releasedBootstrapTenantID, releasedBootstrapUserID}},
+		{"content identity", `SELECT COUNT(*) FROM content WHERE tenant_id = ? OR author_id = ?`, []any{releasedBootstrapTenantID, releasedBootstrapUserID}},
+		{"notification identity", `SELECT COUNT(*) FROM notifications WHERE tenant_id = ? OR user_id = ?`, []any{releasedBootstrapTenantID, releasedBootstrapUserID}},
+		{"subscription identity", `SELECT COUNT(*) FROM notification_subscriptions WHERE tenant_id = ? OR user_id = ?`, []any{releasedBootstrapTenantID, releasedBootstrapUserID}},
 	}
 	for _, check := range checks {
 		var count int

@@ -194,7 +194,7 @@ func TestWithModulesPublicRoutesBypassTheGate(t *testing.T) {
 	defer srv.Close()
 
 	// Public POST works anonymously (the whole point).
-	resp, err := http.Post(srv.URL+"/join/acme", "application/json", strings.NewReader(`{}`))
+	resp, err := http.Post(srv.URL+"/join/example-org", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatalf("public post: %v", err)
 	}

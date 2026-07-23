@@ -22,11 +22,11 @@ const (
 
 	legacyBootstrapTenantID     = "tenant_acme"
 	legacyBootstrapTenantSlug   = "acme"
-	legacyBootstrapTenantName   = "Acme Corporation"
+	legacyBootstrapTenantName   = "Acme Inc"
 	legacyBootstrapUserID       = "user_admin"
 	legacyBootstrapUserEmail    = "admin@local.test"
 	legacyBootstrapUserName     = "admin"
-	legacyBootstrapUserDisplay  = "Administrator"
+	legacyBootstrapUserDisplay  = "Demo Admin"
 	legacyBootstrapUserPassword = "changeme"
 )
 
