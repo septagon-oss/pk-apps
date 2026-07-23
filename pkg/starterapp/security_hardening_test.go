@@ -160,12 +160,21 @@ func TestBuiltinAPIAuthorizationEnforcesReadAndWriteScopes(t *testing.T) {
 	if got := drive(http.MethodPost, "/api/v1/content", reader); got != http.StatusForbidden {
 		t.Fatalf("read-only content write = %d, want 403", got)
 	}
+	if got := drive(http.MethodPost, "/api/v1/notification-subscriptions", reader); got != http.StatusForbidden {
+		t.Fatalf("unrelated scope subscription write = %d, want 403", got)
+	}
 
 	writer := identity.Principal{
 		Subject: "writer", TenantID: "tenant", Scopes: []string{"content:write"},
 	}
 	if got := drive(http.MethodPost, "/api/v1/content", writer); got != http.StatusNoContent {
 		t.Fatalf("scoped content write = %d, want 204", got)
+	}
+	notificationWriter := identity.Principal{
+		Subject: "notifier", TenantID: "tenant", Scopes: []string{"notifications:write"},
+	}
+	if got := drive(http.MethodDelete, "/api/v1/notification-subscriptions/id", notificationWriter); got != http.StatusNoContent {
+		t.Fatalf("scoped subscription write = %d, want 204", got)
 	}
 
 	admin := identity.Principal{

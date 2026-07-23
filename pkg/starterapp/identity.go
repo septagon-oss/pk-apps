@@ -204,6 +204,7 @@ var builtinAPIScopeRules = []apiScopeRule{
 	{path: "/api/v1/api-keys", resource: "api-keys"},
 	{path: "/api/v1/content", resource: "content"},
 	{path: "/api/v1/notifications", resource: "notifications"},
+	{path: "/api/v1/notification-subscriptions", resource: "notifications"},
 }
 
 // authorizeBuiltinAPI gives the starter's built-in data APIs explicit

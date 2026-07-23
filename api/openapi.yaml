@@ -316,6 +316,7 @@ paths:
         - { name: since, in: query, schema: { type: string, format: date-time } }
         - { name: until, in: query, schema: { type: string, format: date-time } }
         - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
       responses:
         '200':
           description: Audit events, newest first.
@@ -380,6 +381,7 @@ paths:
     put:
       tags: [content]
       summary: Update content (caller's tenant only)
+      description: '`author_id`, publication state, tenant, ID, and creation time remain server-owned.'
       operationId: updateContent
       requestBody:
         required: true
@@ -637,6 +639,11 @@ components:
         email: { type: string }
         username: { type: string }
         display_name: { type: string }
+        password:
+          type: string
+          format: password
+          maxLength: 72
+          description: Optional login credential; omit on update to keep the current password.
         active: { type: boolean }
 
     APIKey:
