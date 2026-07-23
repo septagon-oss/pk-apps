@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 
+	pkmodule "github.com/septagon-oss/pk-core/pkg/module"
+	"github.com/septagon-oss/pk-modules/pkg/audit"
 	"github.com/septagon-oss/pk-modules/pkg/portslib"
 )
 
@@ -115,6 +117,44 @@ func TestWithModulesContributesAModule(t *testing.T) {
 		spec.Paths["/api/v1/widgets"]["get"].OperationID != "widgets.list" {
 		t.Fatalf("unexpected extension OpenAPI document: %+v", spec)
 	}
+}
+
+func TestWithModulesPreservesPublishedPortContract(t *testing.T) {
+	t.Parallel()
+
+	plugin := func(ModuleEnv) (ModulePlugin, error) {
+		return ModulePlugin{
+			ID: "published_contract_consumer",
+			Compose: func() pkmodule.Composable {
+				return pkmodule.Must(
+					pkmodule.Metadata{ID: "published_contract_consumer", Version: "0.0.0"},
+					pkmodule.WithDependencies(
+						pkmodule.RequiresPort[audit.AuditService](pkmodule.PortSpec{
+							Version:           "0.0.0",
+							Purpose:           "Consume the published audit contract.",
+							PreferredProvider: "audit_management",
+						}),
+						pkmodule.RequiresPort[portslib.AdminRegistrar](pkmodule.PortSpec{
+							Version:           "0.0.0",
+							Purpose:           "Consume the published admin contract.",
+							PreferredProvider: "admin_management",
+						}),
+					),
+				)
+			},
+			RegisterRoutes: func(*http.ServeMux) {},
+		}, nil
+	}
+
+	app, err := BuildApp(
+		context.Background(),
+		extTestConfig(t),
+		WithModules(plugin),
+	)
+	if err != nil {
+		t.Fatalf("BuildApp with published 0.0.0 port contracts: %v", err)
+	}
+	defer app.Close()
 }
 
 func TestWithModulesPublicRoutesBypassTheGate(t *testing.T) {

@@ -8,7 +8,7 @@
 openapi: 3.0.3
 info:
   title: PlatformKit OSS API
-  version: 0.2.2
+  version: 0.4.0
   description: |
     The HTTP API of the PlatformKit OSS starter (nine modules, multi-tenant,
     SQLite-backed).

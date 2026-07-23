@@ -82,6 +82,22 @@ func specOps(t *testing.T) map[string]map[string]bool {
 	return ops
 }
 
+func TestOpenAPISpecVersionMatchesDefaultConfig(t *testing.T) {
+	t.Parallel()
+
+	spec, err := os.ReadFile(filepath.Join("..", "..", "api", "openapi.yaml"))
+	if err != nil {
+		t.Fatalf("read spec: %v", err)
+	}
+	match := regexp.MustCompile(`(?m)^  version: (\S+)\s*$`).FindSubmatch(spec)
+	if len(match) != 2 {
+		t.Fatal("api/openapi.yaml is missing info.version")
+	}
+	if got, want := string(match[1]), DefaultConfig().AppVersion; got != want {
+		t.Fatalf("api/openapi.yaml info.version = %q, want runtime version %q", got, want)
+	}
+}
+
 func TestOpenAPISpecMatchesApp(t *testing.T) {
 	t.Parallel()
 	ops := specOps(t)

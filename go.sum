@@ -16,8 +16,8 @@ github.com/septagon-oss/pk-core v0.1.0 h1:FrknTc7u6nPiG8eh5yhfH+wANWMCr3vldFnS5z
 github.com/septagon-oss/pk-core v0.1.0/go.mod h1:Bc0Vl7PxXdpAtkyNRo4fSvayYPX6VOtgC45m/k6bsJ0=
 github.com/septagon-oss/pk-design v0.1.0 h1:L+9EC4x9h+wS5nKI1nZnXiF1GNDcrv5Gm5eEd9bKjB8=
 github.com/septagon-oss/pk-design v0.1.0/go.mod h1:gHPDkDfgfgEAOGeSG7mv3gtN0DyDLh7KpxsCg6onsv4=
-github.com/septagon-oss/pk-modules v0.3.1-0.20260723120141-c8bd11522687 h1:MCSaSHBh92V2Q6uMLCcPEQqNLqDTrthh4Lc0wROEqRw=
-github.com/septagon-oss/pk-modules v0.3.1-0.20260723120141-c8bd11522687/go.mod h1:79rUjDjUJDkJKdkJSpFsvoNa/45mVjWML0mq12O5AIE=
+github.com/septagon-oss/pk-modules v0.3.1-0.20260723122145-975ad70091d1 h1:gERfZwBnfnaAkRxu5Zt/TCIynNZ5q+UAuXdL7Jwb0dM=
+github.com/septagon-oss/pk-modules v0.3.1-0.20260723122145-975ad70091d1/go.mod h1:79rUjDjUJDkJKdkJSpFsvoNa/45mVjWML0mq12O5AIE=
 github.com/septagon-oss/pk-runtime v0.1.0 h1:Xbc3qksZMcwfJ3i7fD+DoFKmm8Dszbqza/oZ7sZ4n0E=
 github.com/septagon-oss/pk-runtime v0.1.0/go.mod h1:jvJKQeDUp5bo4BxXMKggWeHsEayWPgreMSNTnDHBQU0=
 github.com/septagon-oss/pk-shared v0.1.0 h1:KhnZ1nrnCwn+ZpNS2ozNK5R5WcXbJkcHbiXHMuNeVY0=
