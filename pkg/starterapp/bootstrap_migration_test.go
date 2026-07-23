@@ -456,6 +456,235 @@ func TestBootstrapMigrationFindsPriorEmailKeyedReplacementAdministrator(t *testi
 	}
 }
 
+func TestBootstrapMigrationFindsReplacementAdministratorWhenTenantRowIsMissing(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	const replacementUserID = "replacement_owner"
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open missing-tenant replacement fixture: %v", err)
+	}
+	updates := []string{
+		`UPDATE users SET id = '` + replacementUserID + `' WHERE id = '` + releasedBootstrapUserID + `'`,
+		`UPDATE auth_sessions SET user_id = '` + replacementUserID + `' WHERE user_id = '` + releasedBootstrapUserID + `'`,
+		`UPDATE api_keys SET user_id = '` + replacementUserID + `' WHERE user_id = '` + releasedBootstrapUserID + `'`,
+		`UPDATE audit_events SET actor = '` + replacementUserID + `' WHERE actor = '` + releasedBootstrapUserID + `'`,
+		`UPDATE content SET author_id = '` + replacementUserID + `' WHERE author_id = '` + releasedBootstrapUserID + `'`,
+		`UPDATE notifications SET user_id = '` + replacementUserID + `' WHERE user_id = '` + releasedBootstrapUserID + `'`,
+		`UPDATE notification_subscriptions SET user_id = '` + replacementUserID + `' WHERE user_id = '` + releasedBootstrapUserID + `'`,
+		`UPDATE extension_assets SET owner_id = '` + replacementUserID + `' WHERE owner_id = '` + releasedBootstrapUserID + `'`,
+	}
+	for _, update := range updates {
+		if _, err := db.ExecContext(ctx, update); err != nil {
+			t.Fatalf("replace bootstrap administrator reference: %v", err)
+		}
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`DELETE FROM tenants WHERE id = ?`,
+		releasedBootstrapTenantID,
+	); err != nil {
+		t.Fatalf("delete released tenant: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close missing-tenant replacement fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() missing tenant with replacement administrator: %v", err)
+	}
+	defer app.Close()
+
+	if app.seedTenantID != releasedBootstrapTenantID ||
+		app.adminSubject != replacementUserID {
+		t.Fatalf(
+			"resolved identity = tenant %q user %q, want tenant %q user %q",
+			app.seedTenantID,
+			app.adminSubject,
+			releasedBootstrapTenantID,
+			replacementUserID,
+		)
+	}
+	var releasedUserCount int
+	if err := app.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM users WHERE id = ?`,
+		releasedBootstrapUserID,
+	).Scan(&releasedUserCount); err != nil {
+		t.Fatalf("count duplicate released administrator: %v", err)
+	}
+	if releasedUserCount != 0 {
+		t.Fatalf("duplicate released administrators = %d, want 0", releasedUserCount)
+	}
+	var extensionOwner string
+	if err := app.db.QueryRowContext(
+		ctx,
+		`SELECT owner_id FROM extension_assets WHERE id = 'asset_existing'`,
+	).Scan(&extensionOwner); err != nil {
+		t.Fatalf("read contributed-module owner: %v", err)
+	}
+	if extensionOwner != replacementUserID {
+		t.Fatalf("contributed-module owner = %q, want %q", extensionOwner, replacementUserID)
+	}
+	for _, check := range []struct {
+		name  string
+		query string
+	}{
+		{"session", `SELECT COUNT(*) FROM auth_sessions WHERE id = 'session_existing' AND revoked_at IS NOT NULL`},
+		{"API key", `SELECT COUNT(*) FROM api_keys WHERE id = 'key_existing' AND revoked_at IS NOT NULL`},
+	} {
+		var revoked int
+		if err := app.db.QueryRowContext(ctx, check.query).Scan(&revoked); err != nil {
+			t.Fatalf("inspect replacement administrator %s revocation: %v", check.name, err)
+		}
+		if revoked != 1 {
+			t.Fatalf("replacement administrator %s revoked rows = %d, want 1", check.name, revoked)
+		}
+	}
+}
+
+func TestBootstrapMigrationRejectsReusedReleasedAdministratorID(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	hasher, err := passhash.NewBcrypt(passhash.MinCost)
+	if err != nil {
+		t.Fatalf("create collision password hasher: %v", err)
+	}
+	ordinaryHash, err := hasher.Hash("ordinary-user-password")
+	if err != nil {
+		t.Fatalf("hash colliding user password: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open released-ID collision fixture: %v", err)
+	}
+	const replacementUserID = "replacement_owner"
+	if _, err := db.ExecContext(
+		ctx,
+		`UPDATE users SET id = ? WHERE id = ?`,
+		replacementUserID,
+		releasedBootstrapUserID,
+	); err != nil {
+		t.Fatalf("re-key released administrator: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO users
+		 (id, tenant_id, email, username, pass_hash, display_name, active, created_at, updated_at)
+		 VALUES (?, ?, 'ordinary@customer.test', 'ordinary', ?, 'Ordinary User', 1, ?, ?)`,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+		ordinaryHash,
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("reuse released administrator ID: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close released-ID collision fixture: %v", err)
+	}
+
+	if _, err := BuildApp(ctx, cfg); err == nil {
+		t.Fatal("BuildApp() granted bootstrap authority across an ambiguous released-ID collision")
+	} else if !strings.Contains(err.Error(), "conflicting released bootstrap administrator") {
+		t.Fatalf("BuildApp() collision error = %v", err)
+	}
+}
+
+func TestBootstrapMigrationRevokesReleasedCredentialsWhenIDIsForeign(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	hasher, err := passhash.NewBcrypt(passhash.MinCost)
+	if err != nil {
+		t.Fatalf("create foreign-ID password hasher: %v", err)
+	}
+	ordinaryHash, err := hasher.Hash("ordinary-user-password")
+	if err != nil {
+		t.Fatalf("hash foreign-ID user password: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open foreign-ID fixture: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`DELETE FROM users WHERE id = ?`,
+		releasedBootstrapUserID,
+	); err != nil {
+		t.Fatalf("delete released administrator: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO tenants (id, slug, name, created_at, updated_at)
+		 VALUES ('tenant_other', 'other', 'Other Tenant', ?, ?)`,
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("insert foreign tenant: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO users
+		 (id, tenant_id, email, username, pass_hash, display_name, active, created_at, updated_at)
+		 VALUES (?, 'tenant_other', 'ordinary@customer.test', 'ordinary', ?, 'Ordinary User', 1, ?, ?)`,
+		releasedBootstrapUserID,
+		ordinaryHash,
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("reuse released ID in foreign tenant: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close foreign-ID fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() with foreign released ID: %v", err)
+	}
+	defer app.Close()
+
+	if app.adminSubject == releasedBootstrapUserID {
+		t.Fatalf("foreign user %q received bootstrap authority", releasedBootstrapUserID)
+	}
+	if _, err := app.authMod.Service().ValidateSession(ctx, "session_existing"); err == nil {
+		t.Fatal("session for superseded released identity remained usable")
+	}
+	var revokedAPIKey int
+	if err := app.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM api_keys
+		 WHERE id = 'key_existing' AND revoked_at IS NOT NULL`,
+	).Scan(&revokedAPIKey); err != nil {
+		t.Fatalf("inspect superseded released API key: %v", err)
+	}
+	if revokedAPIKey != 1 {
+		t.Fatalf("superseded released API key revoked rows = %d, want 1", revokedAPIKey)
+	}
+	foreignUser, err := app.user.Service().Get(
+		ctx,
+		"tenant_other",
+		releasedBootstrapUserID,
+	)
+	if err != nil {
+		t.Fatalf("lookup foreign colliding user: %v", err)
+	}
+	if foreignUser.Email != "ordinary@customer.test" {
+		t.Fatalf("foreign colliding user was mutated to %q", foreignUser.Email)
+	}
+}
+
 func TestBootstrapMigrationDoesNotGrantAdminToNewIDCollision(t *testing.T) {
 	ctx := context.Background()
 	cfg := freshConfig(t)
