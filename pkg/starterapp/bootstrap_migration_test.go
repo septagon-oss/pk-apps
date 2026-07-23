@@ -829,6 +829,254 @@ func TestBootstrapMigrationRepairsMissingReleasedTenant(t *testing.T) {
 	assertDurableBootstrapReferencesPreserved(t, app.db, 1)
 }
 
+func TestBootstrapMigrationRepairsBothMissingReleasedIdentityRows(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open missing-identity fixture: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`DELETE FROM users WHERE id = ? AND tenant_id = ?`,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+	); err != nil {
+		t.Fatalf("delete released administrator: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`DELETE FROM tenants WHERE id = ?`,
+		releasedBootstrapTenantID,
+	); err != nil {
+		t.Fatalf("delete released tenant: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close missing-identity fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() missing both released identity rows: %v", err)
+	}
+	defer app.Close()
+
+	if app.seedTenantID != releasedBootstrapTenantID ||
+		app.adminSubject != releasedBootstrapUserID {
+		t.Fatalf(
+			"repaired identity = tenant %q user %q, want tenant %q user %q",
+			app.seedTenantID,
+			app.adminSubject,
+			releasedBootstrapTenantID,
+			releasedBootstrapUserID,
+		)
+	}
+	if _, err := app.authMod.Service().Login(ctx, releasedBootstrapTenantID, auth.Credentials{
+		Email:    seed.UserEmail,
+		Password: seed.UserPass,
+	}); err != nil {
+		t.Fatalf("recreated released administrator login: %v", err)
+	}
+	assertDurableBootstrapReferencesPreserved(t, app.db, 2)
+
+	for _, check := range []struct {
+		name  string
+		query string
+	}{
+		{"session", `SELECT COUNT(*) FROM auth_sessions WHERE id = 'session_existing' AND revoked_at IS NOT NULL`},
+		{"API key", `SELECT COUNT(*) FROM api_keys WHERE id = 'key_existing' AND revoked_at IS NOT NULL`},
+	} {
+		var revoked int
+		if err := app.db.QueryRowContext(ctx, check.query).Scan(&revoked); err != nil {
+			t.Fatalf("inspect recreated identity %s revocation: %v", check.name, err)
+		}
+		if revoked != 1 {
+			t.Fatalf("recreated identity %s revoked rows = %d, want 1", check.name, revoked)
+		}
+	}
+}
+
+func TestBootstrapMigrationFindsReleasedIDsInUnknownExtensionTable(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open extension-only fixture: %v", err)
+	}
+	for _, statement := range []string{
+		`DELETE FROM users`,
+		`DELETE FROM tenants`,
+		`DELETE FROM auth_sessions`,
+		`DELETE FROM api_keys`,
+		`DELETE FROM audit_events`,
+		`DELETE FROM content`,
+		`DELETE FROM notifications`,
+		`DELETE FROM notification_subscriptions`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("remove built-in identity evidence with %q: %v", statement, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close extension-only fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() with extension-only released IDs: %v", err)
+	}
+	defer app.Close()
+	if app.seedTenantID != releasedBootstrapTenantID ||
+		app.adminSubject != releasedBootstrapUserID {
+		t.Fatalf(
+			"extension-only identity = tenant %q user %q, want tenant %q user %q",
+			app.seedTenantID,
+			app.adminSubject,
+			releasedBootstrapTenantID,
+			releasedBootstrapUserID,
+		)
+	}
+	var extensionTenant, extensionOwner string
+	if err := app.db.QueryRowContext(
+		ctx,
+		`SELECT tenant_id, owner_id FROM extension_assets WHERE id = 'asset_existing'`,
+	).Scan(&extensionTenant, &extensionOwner); err != nil {
+		t.Fatalf("read extension-only durable references: %v", err)
+	}
+	if extensionTenant != releasedBootstrapTenantID ||
+		extensionOwner != releasedBootstrapUserID {
+		t.Fatalf(
+			"extension-only durable references = tenant %q owner %q",
+			extensionTenant,
+			extensionOwner,
+		)
+	}
+}
+
+func TestBootstrapIdentityLedgerRevokesCredentialsBeforeRecreatingDeletedIdentity(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	first, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("first BuildApp(): %v", err)
+	}
+	session, err := first.authMod.Service().Login(ctx, seed.TenantID, auth.Credentials{
+		Email:    seed.UserEmail,
+		Password: seed.UserPass,
+	})
+	if err != nil {
+		t.Fatalf("create pre-deletion session: %v", err)
+	}
+	_, key, err := first.apiKey.Service().Issue(
+		ctx,
+		seed.TenantID,
+		seed.UserID,
+		"pre-deletion",
+		[]string{"content:read"},
+		0,
+	)
+	if err != nil {
+		t.Fatalf("create pre-deletion API key: %v", err)
+	}
+	if _, err := first.db.ExecContext(
+		ctx,
+		`DELETE FROM users WHERE id = ? AND tenant_id = ?`,
+		seed.UserID,
+		seed.TenantID,
+	); err != nil {
+		t.Fatalf("delete recorded administrator: %v", err)
+	}
+	if _, err := first.db.ExecContext(
+		ctx,
+		`DELETE FROM tenants WHERE id = ?`,
+		seed.TenantID,
+	); err != nil {
+		t.Fatalf("delete recorded tenant: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first app: %v", err)
+	}
+
+	second, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() after recorded identity deletion: %v", err)
+	}
+	defer second.Close()
+
+	if _, err := second.authMod.Service().ValidateSession(ctx, session.ID); err == nil {
+		t.Fatal("session for deleted bootstrap identity remained valid after recreation")
+	}
+	for _, check := range []struct {
+		name  string
+		id    string
+		query string
+	}{
+		{
+			name:  "session",
+			id:    session.ID,
+			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = ? AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "API key",
+			id:    key.ID,
+			query: `SELECT COUNT(*) FROM api_keys WHERE id = ? AND revoked_at IS NOT NULL`,
+		},
+	} {
+		var revoked int
+		if err := second.db.QueryRowContext(ctx, check.query, check.id).Scan(&revoked); err != nil {
+			t.Fatalf("inspect recreated recorded identity %s: %v", check.name, err)
+		}
+		if revoked != 1 {
+			t.Fatalf("recreated recorded identity %s revoked rows = %d, want 1", check.name, revoked)
+		}
+	}
+	if _, err := second.authMod.Service().Login(ctx, seed.TenantID, auth.Credentials{
+		Email:    seed.UserEmail,
+		Password: seed.UserPass,
+	}); err != nil {
+		t.Fatalf("recreated recorded administrator login: %v", err)
+	}
+}
+
+func TestBootstrapSeedRepairsMissingPasswordHashInProduction(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	cfg.Environment = "production"
+	cfg.Seed.AdminPassword = "production-bootstrap-password"
+
+	first, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("first production BuildApp(): %v", err)
+	}
+	if _, err := first.db.ExecContext(
+		ctx,
+		`UPDATE users SET pass_hash = '' WHERE id = ? AND tenant_id = ?`,
+		seed.UserID,
+		seed.TenantID,
+	); err != nil {
+		t.Fatalf("clear bootstrap password hash: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first production app: %v", err)
+	}
+
+	second, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("second production BuildApp(): %v", err)
+	}
+	defer second.Close()
+	if _, err := second.authMod.Service().Login(ctx, seed.TenantID, auth.Credentials{
+		Email:    seed.UserEmail,
+		Password: cfg.Seed.AdminPassword,
+	}); err != nil {
+		t.Fatalf("production bootstrap with missing hash was not repaired: %v", err)
+	}
+}
+
 func TestBootstrapMigrationRejectsUnrecordedNeutralIDCollision(t *testing.T) {
 	ctx := context.Background()
 	cfg := freshConfig(t)

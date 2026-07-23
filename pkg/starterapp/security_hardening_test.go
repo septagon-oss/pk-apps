@@ -78,6 +78,16 @@ func TestResolveSeedParamsFailsClosedOutsideDevelopment(t *testing.T) {
 			t.Fatalf("invalid seed.admin_email %q must error before migration", email)
 		}
 	}
+	_, err = resolveSeedParams(&Config{
+		Environment: "production",
+		Seed: SeedConfig{
+			AdminEmail:    "operator@customer.test",
+			AdminPassword: strings.Repeat("é", user.MaxPasswordBytes/2+1),
+		},
+	})
+	if err == nil {
+		t.Fatalf("overlong seed.admin_password must fail before database mutation")
+	}
 }
 
 // TestLoadConfigOmittedEnvironmentFailsClosed proves the fail-open foot-gun is

@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
+	"github.com/septagon-oss/pk-modules/pkg/user"
 )
 
 // resolveSeedParams derives the seed parameters from configuration. In a
@@ -44,6 +45,12 @@ func resolveSeedParams(cfg *Config) (seed.Params, error) {
 					"(only \"development\" may use the local bootstrap password)", cfg.Environment)
 		}
 		password = seed.UserPass
+	}
+	if len([]byte(password)) > user.MaxPasswordBytes {
+		return seed.Params{}, fmt.Errorf(
+			"starterapp: seed.admin_password must be at most %d UTF-8 bytes",
+			user.MaxPasswordBytes,
+		)
 	}
 	return seed.Params{
 		AdminEmail:     email,

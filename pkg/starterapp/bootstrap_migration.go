@@ -245,6 +245,20 @@ func resolveBootstrapIdentity(
 			legacyBootstrapTenantID,
 		)
 	}
+	legacyReferencesExist, err := releasedBootstrapReferencesExist(ctx, db)
+	if err != nil {
+		return bootstrapIdentity{}, fmt.Errorf("starterapp: inspect released bootstrap references: %w", err)
+	}
+	if legacyReferencesExist {
+		// Both bootstrap rows can be deleted independently while tenant-owned
+		// rows survive because neither built-in nor contributed tables require
+		// foreign-key cascades. Recreate the released keys so those rows remain
+		// attached to the administrator instead of recording a fresh identity.
+		return bootstrapIdentity{
+			TenantID: legacyBootstrapTenantID,
+			UserID:   legacyBootstrapUserID,
+		}, nil
+	}
 	if currentTenantExists || currentUserExists {
 		return bootstrapIdentity{}, fmt.Errorf(
 			"starterapp: unrecorded bootstrap ID collision: tenant %q exists=%t; user %q exists=%t under tenant %q",
@@ -256,6 +270,114 @@ func resolveBootstrapIdentity(
 		)
 	}
 	return bootstrapIdentity{TenantID: seed.TenantID, UserID: seed.UserID}, nil
+}
+
+// releasedBootstrapReferencesExist searches every SQLite application table for
+// the exact durable IDs shipped by earlier releases. WithModules tables are
+// intentionally unknown to starterapp, so a fixed list of built-in foreign-key
+// columns would silently orphan downstream data when both identity rows are
+// absent. This scan runs only during the one-time, pre-ledger resolution path.
+func releasedBootstrapReferencesExist(ctx context.Context, db *sql.DB) (bool, error) {
+	quoteIdentifier := func(value string) string {
+		return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+	}
+
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT name
+		 FROM sqlite_master
+		 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+		 ORDER BY name`,
+	)
+	if err != nil {
+		return false, err
+	}
+	var tableNames []string
+	for rows.Next() {
+		var tableName string
+		if err := rows.Scan(&tableName); err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		tableNames = append(tableNames, tableName)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return false, err
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+
+	for _, tableName := range tableNames {
+		columnRows, err := db.QueryContext(
+			ctx,
+			`PRAGMA table_info(`+quoteIdentifier(tableName)+`)`,
+		)
+		if err != nil {
+			return false, err
+		}
+		var columnNames []string
+		for columnRows.Next() {
+			var (
+				columnID    int
+				columnName  string
+				columnType  string
+				notNull     int
+				defaultExpr any
+				primaryKey  int
+			)
+			if err := columnRows.Scan(
+				&columnID,
+				&columnName,
+				&columnType,
+				&notNull,
+				&defaultExpr,
+				&primaryKey,
+			); err != nil {
+				_ = columnRows.Close()
+				return false, err
+			}
+			columnNames = append(columnNames, columnName)
+		}
+		if err := columnRows.Err(); err != nil {
+			_ = columnRows.Close()
+			return false, err
+		}
+		if err := columnRows.Close(); err != nil {
+			return false, err
+		}
+		if len(columnNames) == 0 {
+			continue
+		}
+
+		predicates := make([]string, 0, len(columnNames)*2)
+		args := make([]any, 0, len(columnNames)*2)
+		for _, columnName := range columnNames {
+			column := quoteIdentifier(columnName)
+			predicates = append(predicates, column+" = ?", column+" = ?")
+			args = append(
+				args,
+				legacyBootstrapTenantID,
+				legacyBootstrapUserID,
+			)
+		}
+		query := `SELECT 1
+			FROM ` + quoteIdentifier(tableName) + `
+			WHERE ` + strings.Join(predicates, " OR ") + `
+			LIMIT 1`
+		var found int
+		err = db.QueryRowContext(ctx, query, args...).Scan(&found)
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.Is(err, sql.ErrNoRows):
+			continue
+		default:
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 // migrateBootstrapIdentity neutralizes visible defaults from older releases
@@ -337,6 +459,50 @@ func migrateBootstrapIdentity(
 		)
 	}
 
+	var selectedTenantCount, selectedUserCount int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM tenants WHERE id = ?`,
+		identity.TenantID,
+	).Scan(&selectedTenantCount); err != nil {
+		return fmt.Errorf("starterapp: inspect selected bootstrap tenant: %w", err)
+	}
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM users WHERE id = ? AND tenant_id = ?`,
+		identity.UserID,
+		identity.TenantID,
+	).Scan(&selectedUserCount); err != nil {
+		return fmt.Errorf("starterapp: inspect selected bootstrap administrator: %w", err)
+	}
+	identityIncomplete := selectedTenantCount == 0 || selectedUserCount == 0
+	now := time.Now().UTC()
+	revokeRecreatedIdentityCredentials := func() error {
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE auth_sessions
+			 SET revoked_at = ?
+			 WHERE tenant_id = ? AND user_id = ? AND revoked_at IS NULL`,
+			now,
+			identity.TenantID,
+			identity.UserID,
+		); err != nil {
+			return fmt.Errorf("starterapp: revoke sessions for recreated bootstrap identity: %w", err)
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE api_keys
+			 SET revoked_at = ?
+			 WHERE tenant_id = ? AND user_id = ? AND revoked_at IS NULL`,
+			now,
+			identity.TenantID,
+			identity.UserID,
+		); err != nil {
+			return fmt.Errorf("starterapp: revoke API keys for recreated bootstrap identity: %w", err)
+		}
+		return nil
+	}
+
 	var alreadyApplied int
 	if err := tx.QueryRowContext(
 		ctx,
@@ -346,6 +512,11 @@ func migrateBootstrapIdentity(
 		return fmt.Errorf("starterapp: inspect migration ledger: %w", err)
 	}
 	if alreadyApplied != 0 {
+		if identityIncomplete {
+			if err := revokeRecreatedIdentityCredentials(); err != nil {
+				return err
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("starterapp: finish applied bootstrap identity migration: %w", err)
 		}
@@ -492,7 +663,6 @@ func migrateBootstrapIdentity(
 	replacementDisplay := legacyUserDisplay
 	replacementPassHash := legacyPassHash
 	legacyPasswordWasDefault := false
-	recreatingBootstrapUser := !legacyUserExists
 	if legacyUserExists {
 		if legacyUserEmail == legacyBootstrapUserEmail {
 			replacementEmail, err = availableEmail(adminEmail)
@@ -519,7 +689,6 @@ func migrateBootstrapIdentity(
 		}
 	}
 
-	now := time.Now().UTC()
 	if legacyTenantExists {
 		if _, err := tx.ExecContext(
 			ctx,
@@ -547,7 +716,11 @@ func migrateBootstrapIdentity(
 			return fmt.Errorf("starterapp: neutralize bootstrap administrator labels: %w", err)
 		}
 	}
-	if legacyPasswordWasDefault || recreatingBootstrapUser {
+	if identityIncomplete {
+		if err := revokeRecreatedIdentityCredentials(); err != nil {
+			return err
+		}
+	} else if legacyPasswordWasDefault {
 		if _, err := tx.ExecContext(
 			ctx,
 			`UPDATE auth_sessions
@@ -558,19 +731,6 @@ func migrateBootstrapIdentity(
 			identity.UserID,
 		); err != nil {
 			return fmt.Errorf("starterapp: revoke sessions for migrated bootstrap administrator: %w", err)
-		}
-	}
-	if recreatingBootstrapUser {
-		if _, err := tx.ExecContext(
-			ctx,
-			`UPDATE api_keys
-			 SET revoked_at = ?
-			 WHERE tenant_id = ? AND user_id = ? AND revoked_at IS NULL`,
-			now,
-			identity.TenantID,
-			identity.UserID,
-		); err != nil {
-			return fmt.Errorf("starterapp: revoke API keys for recreated bootstrap administrator: %w", err)
 		}
 	}
 

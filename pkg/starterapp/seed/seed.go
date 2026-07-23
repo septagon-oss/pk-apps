@@ -82,11 +82,21 @@ func Run(ctx context.Context, tenantSvc tenant.TenantService, userSvc user.UserS
 	if userSvc == nil {
 		return res, errors.New("seed: user service is required")
 	}
+	params.AdminEmail = strings.TrimSpace(params.AdminEmail)
 	if params.AdminEmail == "" {
 		return res, errors.New("seed: admin email is required")
 	}
+	if !strings.Contains(params.AdminEmail, "@") {
+		return res, fmt.Errorf("seed: admin email %q must contain '@'", params.AdminEmail)
+	}
 	if params.AdminPassword == "" {
 		return res, errors.New("seed: admin password is required")
+	}
+	if len([]byte(params.AdminPassword)) > user.MaxPasswordBytes {
+		return res, fmt.Errorf(
+			"seed: admin password must be at most %d UTF-8 bytes",
+			user.MaxPasswordBytes,
+		)
 	}
 	tenantID := params.TenantID
 	if tenantID == "" {
@@ -173,7 +183,11 @@ func ensureAdminUser(
 ) (bool, error) {
 	existing, err := userSvc.Get(ctx, tenantID, userID)
 	if err == nil && existing != nil {
-		if params.RepairPassword {
+		if existing.PassHash == "" {
+			if sErr := userSvc.SetPassword(ctx, tenantID, existing.ID, params.AdminPassword); sErr != nil {
+				return false, fmt.Errorf("seed: repair missing admin password: %w", sErr)
+			}
+		} else if params.RepairPassword {
 			if vErr := userSvc.VerifyPassword(ctx, tenantID, existing.ID, params.AdminPassword); vErr != nil {
 				if sErr := userSvc.SetPassword(ctx, tenantID, existing.ID, params.AdminPassword); sErr != nil {
 					return false, fmt.Errorf("seed: repair admin password: %w", sErr)
