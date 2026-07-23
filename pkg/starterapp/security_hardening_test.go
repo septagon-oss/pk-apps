@@ -176,7 +176,7 @@ func TestBuiltinAPIAuthorizationEnforcesReadAndWriteScopes(t *testing.T) {
 	}
 
 	// Extension capabilities remain owned by the extension's handler.
-	if got := drive(http.MethodGet, "/api/v1/polls", ordinary); got != http.StatusNoContent {
+	if got := drive(http.MethodGet, "/api/v1/custom-resources", ordinary); got != http.StatusNoContent {
 		t.Fatalf("contributed route was intercepted by built-in authorization: %d", got)
 	}
 }

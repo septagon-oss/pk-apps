@@ -100,7 +100,7 @@ func TestAPIKeyResolverPropagatesModuleScopesAndFiltersInteractiveScopes(t *test
 	resolver := newAPIKeyResolver(resolverAPIKeyService{key: &apikey.APIKey{
 		UserID:   "service",
 		TenantID: "tenant",
-		Scopes:   []string{"polls:read", scopeAdmin, scopeConsoleAccess},
+		Scopes:   []string{"extension:read", scopeAdmin, scopeConsoleAccess},
 	}})
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer pk_example")
@@ -108,7 +108,7 @@ func TestAPIKeyResolverPropagatesModuleScopesAndFiltersInteractiveScopes(t *test
 	if err != nil {
 		t.Fatalf("resolve API key: %v", err)
 	}
-	if !principal.HasScope("polls:read") {
+	if !principal.HasScope("extension:read") {
 		t.Fatalf("module scope was dropped: %v", principal.Scopes)
 	}
 	if principal.HasScope(scopeAdmin) || principal.HasScope(scopeConsoleAccess) {
