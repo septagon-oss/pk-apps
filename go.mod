@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/septagon-oss/pk-core v0.1.0
-	github.com/septagon-oss/pk-modules v0.3.1-0.20260723112411-3a9c1b5d8449
+	github.com/septagon-oss/pk-modules v0.3.1-0.20260723113202-9fcf997135f4
 	github.com/septagon-oss/pk-runtime v0.1.0
 	github.com/septagon-oss/pk-shared v0.1.0
 	github.com/septagon-oss/pk-testkit v0.1.0
