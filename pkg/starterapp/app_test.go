@@ -15,6 +15,7 @@ package starterapp
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -223,13 +224,40 @@ func TestRoutesAreRegistered(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("GET /: status = %d, want 200", resp.StatusCode)
 	}
-	bodyBytes := make([]byte, 4096)
-	n, _ := resp.Body.Read(bodyBytes)
-	body := string(bodyBytes[:n])
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read root body: %v", err)
+	}
+	body := string(bodyBytes)
 	if !strings.Contains(body, app.adminBasePath) {
 		t.Errorf("root index missing admin base path %q in body=%q", app.adminBasePath, body)
 	}
-	if !strings.Contains(body, seed.UserEmail) {
-		t.Errorf("root index missing seed email %q in body=%q", seed.UserEmail, body)
+	if strings.Contains(body, seed.UserEmail) || strings.Contains(body, seed.UserPass) {
+		t.Error("public root index must not expose development credentials")
+	}
+	if !strings.Contains(body, "One process. Real product surface.") {
+		t.Error("root index is missing the product landing-page headline")
+	}
+}
+
+func TestDefaultConfigBindsToLoopback(t *testing.T) {
+	t.Parallel()
+	if got := DefaultConfig().HTTP.Addr; got != "127.0.0.1:8080" {
+		t.Fatalf("DefaultConfig HTTP address = %q, want loopback-only default", got)
+	}
+}
+
+func TestDisplayURLProducesNavigableLocalAddresses(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		":8080":           "http://127.0.0.1:8080",
+		"127.0.0.1:8080": "http://127.0.0.1:8080",
+		"0.0.0.0:8080":   "http://127.0.0.1:8080",
+		"[::]:8080":      "http://127.0.0.1:8080",
+	}
+	for input, want := range tests {
+		if got := displayURL(input); got != want {
+			t.Errorf("displayURL(%q) = %q, want %q", input, got, want)
+		}
 	}
 }

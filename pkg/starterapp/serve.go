@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -86,17 +87,41 @@ func Run(ctx context.Context, cfg *Config, opts ...Option) error {
 // exactly how to reach the admin UI and what credentials to type.
 func printBanner(cfg *Config, app *App) {
 	bar := "============================================================"
+	baseURL := displayURL(cfg.HTTP.Addr)
 	fmt.Println(bar)
 	fmt.Println(" starter-saas — PlatformKit OSS monolith")
-	fmt.Printf("  listening:    http://localhost%s\n", cfg.HTTP.Addr)
-	fmt.Printf("  admin UI:     http://localhost%s%s\n", cfg.HTTP.Addr, app.adminBasePath)
-	fmt.Printf("  health:       http://localhost%s/healthz\n", cfg.HTTP.Addr)
-	fmt.Printf("  metrics:      http://localhost%s/metrics\n", cfg.HTTP.Addr)
-	fmt.Printf("  default login: %s / %s\n", app.seedEmail, app.seedPassword)
+	fmt.Printf("  listening:    %s\n", baseURL)
+	fmt.Printf("  admin UI:     %s%s\n", baseURL, app.adminBasePath)
+	fmt.Printf("  health:       %s/healthz\n", baseURL)
+	fmt.Printf("  OpenAPI:      %s/openapi/extensions.json\n", baseURL)
+	if cfg.Environment == "development" {
+		fmt.Printf("  demo login:   %s / %s\n", app.seedEmail, app.seedPassword)
+	} else {
+		fmt.Println("  admin login:  configured seed account (password is never printed)")
+	}
 	ids := app.AllModuleIDs()
 	fmt.Printf("  modules:      %d composed (%s)\n", len(ids), strings.Join(ids, ", "))
 	fmt.Println(bar)
 	printDevelopmentWarning(cfg)
+}
+
+// displayURL turns a listen address into a browser-friendly local URL. Wildcard
+// bind addresses are represented as loopback because 0.0.0.0 and :: are listen
+// targets, not useful navigation hosts.
+func displayURL(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if strings.HasPrefix(addr, ":") {
+		return "http://127.0.0.1" + addr
+	}
+	hostName, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "http://" + addr
+	}
+	switch hostName {
+	case "", "0.0.0.0", "::":
+		hostName = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(hostName, port)
 }
 
 // printDevelopmentWarning emits a loud, unmissable notice when the app runs in

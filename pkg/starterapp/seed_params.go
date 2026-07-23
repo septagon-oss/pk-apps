@@ -45,11 +45,9 @@ func resolveSeedParams(cfg *Config) (seed.Params, error) {
 	}, nil
 }
 
-// seedBannerCredential returns what the startup banner and the unauthenticated
-// index page should show for the login. The real credentials are only shown in
-// development (a local demo); outside development BOTH the email and password
-// are redacted, so the public root page does not hand an unauthenticated
-// visitor a valid admin username to brute-force.
+// seedBannerCredential returns what the development-only startup banner may
+// show for the demo login. Outside development BOTH fields are redacted; the
+// public root page never renders either value.
 func seedBannerCredential(cfg *Config, params seed.Params) (email, password string) {
 	if cfg.Environment == "development" {
 		return params.AdminEmail, params.AdminPassword

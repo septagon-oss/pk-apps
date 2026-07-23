@@ -18,6 +18,7 @@ import (
 
 	pkmodule "github.com/septagon-oss/pk-core/pkg/module"
 
+	"github.com/septagon-oss/pk-modules/pkg/audit"
 	"github.com/septagon-oss/pk-modules/pkg/portslib"
 )
 
@@ -29,6 +30,23 @@ type ModuleEnv struct {
 	DB     *sql.DB
 	Admin  portslib.AdminRegistrar
 	Health portslib.HealthRegistrar
+	Audit  audit.AuditService
+}
+
+// OpenAPIOperation describes one HTTP operation contributed by an extension.
+// The starter publishes these declarations as an OpenAPI 3.1 document at
+// /openapi/extensions.json. It deliberately models the small common surface
+// extensions need while allowing the module's own repository to carry richer
+// request and response schemas when required.
+type OpenAPIOperation struct {
+	OperationID   string
+	Method        string
+	Path          string
+	Summary       string
+	Description   string
+	Tags          []string
+	Public        bool
+	SuccessStatus int
 }
 
 // ModulePlugin is what a contributed module returns. RegisterRoutes is
@@ -56,6 +74,10 @@ type ModulePlugin struct {
 	// cap, but they bypass the anonymous-mutation gate at any path. Use this
 	// only for surfaces you intend to be world-reachable. Optional.
 	RegisterPublicRoutes func(mux *http.ServeMux)
+	// OpenAPI declares the extension's supported HTTP operations. BuildApp
+	// validates method/path/operation-ID uniqueness before accepting the
+	// plugin, then exposes one aggregate OpenAPI 3.1 document for tooling.
+	OpenAPI []OpenAPIOperation
 }
 
 // ExtraModule builds one contributed module from the shared environment. It

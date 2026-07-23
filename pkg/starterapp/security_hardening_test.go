@@ -30,7 +30,9 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
+	"github.com/septagon-oss/pk-modules/pkg/auth"
 	"github.com/septagon-oss/pk-modules/pkg/content"
+	"github.com/septagon-oss/pk-modules/pkg/user"
 )
 
 // TestResolveSeedParamsFailsClosedOutsideDevelopment covers the composition rule
@@ -127,9 +129,90 @@ func TestMutationGateExemptsOnlyLogin(t *testing.T) {
 	check(http.MethodGet, "/api/v1/content", true)               // reads pass the gate (handlers enforce)
 }
 
-// TestGuardAdminRequiresSession proves /admin admits only interactive session
-// principals: anonymous and API-key credentials are redirected to login.
-func TestGuardAdminRequiresSession(t *testing.T) {
+func TestBuiltinAPIAuthorizationEnforcesReadAndWriteScopes(t *testing.T) {
+	t.Parallel()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := authorizeBuiltinAPI(next)
+	drive := func(method, path string, principal identity.Principal) int {
+		t.Helper()
+		req := httptest.NewRequest(method, path, nil)
+		req = req.WithContext(identity.ContextWithPrincipal(req.Context(), principal))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	ordinary := identity.Principal{
+		Subject: "user", TenantID: "tenant", Scopes: []string{scopeAuthenticated},
+	}
+	if got := drive(http.MethodGet, "/api/v1/content", ordinary); got != http.StatusForbidden {
+		t.Fatalf("ordinary content read = %d, want 403", got)
+	}
+
+	reader := identity.Principal{
+		Subject: "reader", TenantID: "tenant", Scopes: []string{"content:read"},
+	}
+	if got := drive(http.MethodGet, "/api/v1/content", reader); got != http.StatusNoContent {
+		t.Fatalf("scoped content read = %d, want 204", got)
+	}
+	if got := drive(http.MethodPost, "/api/v1/content", reader); got != http.StatusForbidden {
+		t.Fatalf("read-only content write = %d, want 403", got)
+	}
+
+	writer := identity.Principal{
+		Subject: "writer", TenantID: "tenant", Scopes: []string{"content:write"},
+	}
+	if got := drive(http.MethodPost, "/api/v1/content", writer); got != http.StatusNoContent {
+		t.Fatalf("scoped content write = %d, want 204", got)
+	}
+
+	admin := identity.Principal{
+		Subject: "admin", TenantID: "tenant", Scopes: []string{scopeAdmin},
+	}
+	if got := drive(http.MethodDelete, "/api/v1/users/id", admin); got != http.StatusNoContent {
+		t.Fatalf("administrator write = %d, want 204", got)
+	}
+
+	// Extension capabilities remain owned by the extension's handler.
+	if got := drive(http.MethodGet, "/api/v1/polls", ordinary); got != http.StatusNoContent {
+		t.Fatalf("contributed route was intercepted by built-in authorization: %d", got)
+	}
+}
+
+func TestMetricsRequiresExplicitScope(t *testing.T) {
+	t.Parallel()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := requireMetricsAccess(next)
+	drive := func(principal identity.Principal) int {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		req = req.WithContext(identity.ContextWithPrincipal(req.Context(), principal))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if got := drive(identity.Principal{}); got != http.StatusUnauthorized {
+		t.Fatalf("anonymous metrics = %d, want 401", got)
+	}
+	if got := drive(identity.Principal{
+		Subject: "user", TenantID: "tenant", Scopes: []string{scopeAuthenticated},
+	}); got != http.StatusForbidden {
+		t.Fatalf("ordinary metrics = %d, want 403", got)
+	}
+	if got := drive(identity.Principal{
+		Subject: "scraper", TenantID: "tenant", Scopes: []string{"metrics:read"},
+	}); got != http.StatusNoContent {
+		t.Fatalf("scoped metrics = %d, want 204", got)
+	}
+}
+
+// TestGuardAdminRequiresExplicitConsoleScopes proves /admin redirects anonymous
+// visitors and rejects signed-in users that lack console capabilities.
+func TestGuardAdminRequiresExplicitConsoleScopes(t *testing.T) {
 	t.Parallel()
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	h := guardAdmin(next)
@@ -146,11 +229,115 @@ func TestGuardAdminRequiresSession(t *testing.T) {
 	if code := drive(nil); code != http.StatusSeeOther {
 		t.Fatalf("anonymous /admin = %d, want 303 redirect", code)
 	}
-	if code := drive(&identity.Principal{Subject: "svc", TenantID: "t", AuthMethod: "api_key"}); code != http.StatusSeeOther {
-		t.Fatalf("api-key /admin = %d, want 303 redirect (machine creds excluded)", code)
+	if code := drive(&identity.Principal{
+		Subject: "user", TenantID: "t", AuthMethod: "session", Scopes: []string{scopeAuthenticated},
+	}); code != http.StatusForbidden {
+		t.Fatalf("ordinary session /admin = %d, want 403", code)
 	}
-	if code := drive(&identity.Principal{Subject: "u", TenantID: "t", AuthMethod: "session"}); code != http.StatusOK {
-		t.Fatalf("session /admin = %d, want 200", code)
+	if code := drive(&identity.Principal{
+		Subject: "admin", TenantID: "t", AuthMethod: "session",
+		Scopes: []string{scopeAuthenticated, scopeAdmin, scopeConsoleAccess},
+	}); code != http.StatusOK {
+		t.Fatalf("scoped admin session /admin = %d, want 200", code)
+	}
+}
+
+func TestOrdinarySessionCannotOpenAdmin(t *testing.T) {
+	t.Parallel()
+	cfg := DefaultConfig()
+	cfg.Database.DSN = fmt.Sprintf("file:%s?cache=shared&mode=rwc", filepath.Join(t.TempDir(), "pk.db"))
+	app, err := BuildApp(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	defer app.Close()
+
+	ordinary := &user.User{
+		ID:          "user_ordinary",
+		TenantID:    seed.TenantID,
+		Email:       "ordinary@example.test",
+		Username:    "ordinary",
+		DisplayName: "Ordinary User",
+		Active:      true,
+	}
+	if err := app.user.Service().Create(context.Background(), ordinary); err != nil {
+		t.Fatalf("create ordinary user: %v", err)
+	}
+	if err := app.user.Service().SetPassword(
+		context.Background(),
+		ordinary.TenantID,
+		ordinary.ID,
+		"ordinary-password",
+	); err != nil {
+		t.Fatalf("set ordinary password: %v", err)
+	}
+	session, err := app.authMod.Service().Login(context.Background(), ordinary.TenantID, auth.Credentials{
+		Email:    ordinary.Email,
+		Password: "ordinary-password",
+	})
+	if err != nil {
+		t.Fatalf("ordinary login: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req.Header.Set("Authorization", "Bearer "+session.ID)
+	rec := httptest.NewRecorder()
+	mustMux(t, app).ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("ordinary session /admin = %d, want 403", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "insufficient scope") {
+		t.Fatalf("403 page lacks actionable scope message: %q", rec.Body.String())
+	}
+}
+
+func TestAdminLoginIsResponsiveAccessibleAndDoesNotExposePassword(t *testing.T) {
+	t.Parallel()
+	cfg := DefaultConfig()
+	cfg.Database.DSN = fmt.Sprintf("file:%s?cache=shared&mode=rwc", filepath.Join(t.TempDir(), "pk.db"))
+	app, err := BuildApp(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	defer app.Close()
+	handler := mustMux(t, app)
+
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, httptest.NewRequest(http.MethodGet, adminLoginPath, nil))
+	body := get.Body.String()
+	for _, marker := range []string{
+		`name="viewport"`,
+		`min-width: 320px`,
+		`prefers-reduced-motion`,
+		`aria-labelledby="signin-title"`,
+		`required autofocus`,
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("login page missing %q", marker)
+		}
+	}
+	if strings.Contains(body, seed.UserPass) {
+		t.Fatal("login page must not expose the development password")
+	}
+
+	post := httptest.NewRequest(
+		http.MethodPost,
+		adminLoginPath,
+		strings.NewReader("tenant_id=tenant_acme&email=remember%40example.test&password=wrong"),
+	)
+	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	failed := httptest.NewRecorder()
+	handler.ServeHTTP(failed, post)
+	if failed.Code != http.StatusUnauthorized {
+		t.Fatalf("failed login status = %d, want 401", failed.Code)
+	}
+	failedBody := failed.Body.String()
+	if !strings.Contains(failedBody, `role="alert"`) ||
+		!strings.Contains(failedBody, `value="remember@example.test"`) {
+		t.Fatalf("failed login must expose an accessible error and retain the email: %q", failedBody)
+	}
+	if strings.Contains(failedBody, `value="wrong"`) {
+		t.Fatal("failed login must never repopulate the password")
 	}
 }
 

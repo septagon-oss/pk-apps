@@ -14,16 +14,18 @@ cd pk-apps/apps/starter-saas
 go run .
 ```
 
-The binary boots on `:8080` and prints a banner with the admin URL plus
-default credentials. On first boot it creates one tenant (`Acme Inc`) and one
-admin user (`admin@local.test` / `changeme`).
+The binary binds to loopback at `127.0.0.1:8080` and prints the admin URL plus
+development credentials in the terminal. On first boot it creates one tenant
+and one administrator. The public landing and login pages never expose the
+password.
 
 | Endpoint | Purpose |
 |----------|---------|
 | `http://localhost:8080/` | HTML landing page |
-| `http://localhost:8080/admin` | Admin UI (entity CRUD + custom pages) |
+| `http://localhost:8080/admin` | Scope-protected, schema-aware operator console |
 | `http://localhost:8080/healthz` | Aggregated health checks (JSON) |
-| `http://localhost:8080/metrics` | `expvar` runtime metrics (JSON) |
+| `http://localhost:8080/metrics` | Authenticated `expvar` runtime metrics (JSON) |
+| `http://localhost:8080/openapi/extensions.json` | Extension OpenAPI 3.1 document |
 | `http://localhost:8080/live` | Liveness probe (`204 No Content`) |
 | `http://localhost:8080/ready` | Readiness probe (JSON) |
 | `http://localhost:8080/api/v1/tenants` | Tenant CRUD |
@@ -36,8 +38,22 @@ admin user (`admin@local.test` / `changeme`).
 
 ## Configuration
 
-`config.yaml` is read from the working directory at startup. Every key has a
-sensible default if the file is missing.
+`config.yaml` is read from the working directory at startup. The checked-in
+development config is immediately runnable and loopback-only. Calling
+`starterapp.DefaultConfig()` directly gives the same safe local default.
+
+A missing expected config file fails closed as production and requires
+`seed.admin_password`. To listen beyond loopback, explicitly set the address
+and use production mode:
+
+```yaml
+environment: "production"
+http:
+  addr: "0.0.0.0:8080"
+seed:
+  admin_email: "operator@example.com"
+  admin_password: "load-this-from-your-secret-store"
+```
 
 To swap the database driver, register a different `database/sql` driver in
 `main.go` and update `database.dsn` in `config.yaml`. The OSS reference
@@ -57,28 +73,42 @@ package, so the runnable app has exactly one source of truth.
 
 The app opens **one** shared `*sql.DB` in `starterapp.BuildApp` and every data
 module is built on that single connection pool. Do not give a new module its
-own `WithSQLiteDSN(...)` handle — that would fan out into independent pools over
-one SQLite file and reintroduce `SQLITE_BUSY` / table-visibility problems on a
-fresh database. Edit `pkg/starterapp/app.go` and reuse the existing `db`:
+own handle. Contribute it through the supported `WithModules` seam; its
+`ModuleEnv` supplies the shared database plus admin, health, and audit ports:
 
-1. Build the module's store on the shared `db` and pass it via `WithStore`:
-   ```go
-   myStore, err := mysqlite.New(db) // db is the single *sql.DB BuildApp opened
-   if err != nil {
-       _ = db.Close()
-       return nil, fmt.Errorf("my store: %w", err)
-   }
-   myMod, err := mymodule.NewModule(
-       mymodule.WithStore(myStore),
-       mymodule.WithAdminRegistrar(adminReg),
-       mymodule.WithHealthRegistrar(healthReg),
-   )
-   ```
-   (Auth is the one exception: it takes the shared handle directly via
-   `WithSQLiteDB(db)`.)
-2. Append `m.Compose` to the `pkmodule.NewBundle` entries and the module ID
-   to the `modules` slice.
-3. Call `m.HTTPHandler().RegisterRoutes(mux)` in `(*App).Mux()`.
+```go
+cfg := starterapp.DefaultConfig()
+err := starterapp.Run(ctx, cfg, starterapp.WithModules(
+    func(env starterapp.ModuleEnv) (starterapp.ModulePlugin, error) {
+        store, err := mysqlite.New(env.DB)
+        if err != nil {
+            return starterapp.ModulePlugin{}, err
+        }
+        module, err := mymodule.New(
+            mymodule.WithStore(store),
+            mymodule.WithAudit(env.Audit),
+        )
+        if err != nil {
+            return starterapp.ModulePlugin{}, err
+        }
+        return starterapp.ModulePlugin{
+            ID:             "my_module",
+            RegisterRoutes: module.RegisterRoutes,
+            OpenAPI: []starterapp.OpenAPIOperation{{
+                OperationID: "things.list",
+                Method:      "GET",
+                Path:        "/api/v1/things",
+                Summary:     "List things",
+            }},
+        }, nil
+    },
+))
+```
+
+Authenticated routes inherit identity resolution, the anonymous mutation gate,
+and the 1 MiB request-body cap. Declare intentionally anonymous surfaces with
+`RegisterPublicRoutes`; those routes remain body-capped and appear as public in
+the contributed OpenAPI document.
 
 ## Tests
 

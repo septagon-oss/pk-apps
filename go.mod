@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/septagon-oss/pk-core v0.1.0
-	github.com/septagon-oss/pk-modules v0.3.0
+	github.com/septagon-oss/pk-modules v0.3.1-0.20260723103205-ce13dfa22199
 	github.com/septagon-oss/pk-runtime v0.1.0
 	github.com/septagon-oss/pk-shared v0.1.0
 	github.com/septagon-oss/pk-testkit v0.1.0
@@ -17,6 +17,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	github.com/septagon-oss/pk-design v0.1.0 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	modernc.org/libc v1.72.3 // indirect

@@ -18,7 +18,7 @@ modules, client overlays, staging state, or hosted deployment automation.
 
 ## Run me first: `apps/starter-saas`
 
-The canonical "first-run" path for PlatformKit OSS v0.1.0 is the
+The canonical first-run path for PlatformKit OSS is the
 **Starter SaaS** monolith at `apps/starter-saas`. One Go binary, one
 SQLite file, and all nine OSS modules — `tenant_management`,
 `user_management`, `auth_management`, `api_key_management`,
@@ -33,18 +33,21 @@ cd pk-apps/apps/starter-saas
 go run .
 ```
 
-The binary boots on `:8080` and prints a banner with the admin URL plus
-default credentials. On first boot it creates one tenant (`Acme Inc`)
-and one admin user (`admin@local.test` / `changeme`).
+The binary binds to loopback at `127.0.0.1:8080`, prints the local admin URL,
+and creates one development tenant plus administrator on first boot. Demo
+credentials appear in the terminal only; the public landing page never exposes
+them. A network-exposed deployment must set `environment: production`, provide
+`seed.admin_password`, and explicitly choose its listen address.
 
-### What you get on `:8080`
+### What you get on `127.0.0.1:8080`
 
 | Endpoint | Purpose |
 |----------|---------|
 | `/` | HTML landing page |
-| `/admin` | Admin UI (entity CRUD + custom pages) |
+| `/admin` | Scope-protected, schema-aware operator console |
 | `/healthz` | Aggregated health checks (JSON) |
-| `/metrics` | `expvar` runtime metrics (JSON) |
+| `/metrics` | Authenticated `expvar` runtime metrics (JSON) |
+| `/openapi/extensions.json` | OpenAPI 3.1 operations contributed by extensions |
 | `/live` | Liveness probe (`204 No Content`) |
 | `/ready` | Readiness probe (JSON) |
 | `/api/v1/tenants` | Tenant CRUD |
@@ -58,9 +61,8 @@ and one admin user (`admin@local.test` / `changeme`).
 See `apps/starter-saas/README.md` for the full reference, including
 config, adding modules, and tests.
 
-For a deeper walkthrough — what to read first, what to change first,
-and how to swap a provider — see the
-[quickstart in pk-docs](https://github.com/septagon-oss/pk-docs/blob/main/docs/v0.2.0/quickstart.md).
+For architecture, configuration, security, and extension guides, start at the
+[PlatformKit documentation hub](https://github.com/septagon-oss/pk-docs).
 
 ## Other examples
 

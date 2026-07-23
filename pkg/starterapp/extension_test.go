@@ -10,6 +10,7 @@ package starterapp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -48,10 +49,20 @@ func TestWithModulesContributesAModule(t *testing.T) {
 	cfg := extTestConfig(t)
 
 	widget := func(env ModuleEnv) (ModulePlugin, error) {
-		if env.DB == nil || env.Admin == nil || env.Health == nil {
+		if env.DB == nil || env.Admin == nil || env.Health == nil || env.Audit == nil {
 			return ModulePlugin{}, fmt.Errorf("env not fully wired")
 		}
-		return ModulePlugin{ID: "widget", RegisterRoutes: widgetHandler{}.RegisterRoutes}, nil
+		return ModulePlugin{
+			ID:             "widget",
+			RegisterRoutes: widgetHandler{}.RegisterRoutes,
+			OpenAPI: []OpenAPIOperation{{
+				OperationID: "widgets.list",
+				Method:      http.MethodGet,
+				Path:        "/api/v1/widgets",
+				Summary:     "List widgets",
+				Tags:        []string{"widgets"},
+			}},
+		}, nil
 	}
 
 	app, err := BuildApp(context.Background(), cfg, WithModules(widget))
@@ -84,6 +95,25 @@ func TestWithModulesContributesAModule(t *testing.T) {
 	resp.Body.Close()
 	if !strings.Contains(string(b), "widget for tenant_acme/") {
 		t.Fatalf("authenticated widget body = %q, want it to see the caller's tenant", b)
+	}
+
+	specResp, err := http.Get(srv.URL + "/openapi/extensions.json")
+	if err != nil {
+		t.Fatalf("OpenAPI get: %v", err)
+	}
+	defer specResp.Body.Close()
+	var spec struct {
+		OpenAPI string `json:"openapi"`
+		Paths   map[string]map[string]struct {
+			OperationID string `json:"operationId"`
+		} `json:"paths"`
+	}
+	if err := json.NewDecoder(specResp.Body).Decode(&spec); err != nil {
+		t.Fatalf("decode OpenAPI: %v", err)
+	}
+	if spec.OpenAPI != "3.1.0" ||
+		spec.Paths["/api/v1/widgets"]["get"].OperationID != "widgets.list" {
+		t.Fatalf("unexpected extension OpenAPI document: %+v", spec)
 	}
 }
 
@@ -172,5 +202,55 @@ func TestWithModulesRequiresRoutes(t *testing.T) {
 	_, err := BuildApp(context.Background(), extTestConfig(t), WithModules(noRoutes))
 	if err == nil || !strings.Contains(err.Error(), "RegisterRoutes or RegisterPublicRoutes is required") {
 		t.Fatalf("expected routes-required error, got %v", err)
+	}
+}
+
+func TestWithModulesRejectsInvalidOrDuplicateOpenAPI(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		ops  []OpenAPIOperation
+		want string
+	}{
+		{
+			name: "invalid method",
+			ops:  []OpenAPIOperation{{OperationID: "widget.read", Method: "TRACE", Path: "/widgets", Summary: "Read"}},
+			want: "unsupported method",
+		},
+		{
+			name: "invalid path",
+			ops:  []OpenAPIOperation{{OperationID: "widget.read", Method: "GET", Path: "widgets", Summary: "Read"}},
+			want: "invalid canonical path",
+		},
+		{
+			name: "missing summary",
+			ops:  []OpenAPIOperation{{OperationID: "widget.read", Method: "GET", Path: "/widgets"}},
+			want: "summary is required",
+		},
+		{
+			name: "duplicate route",
+			ops: []OpenAPIOperation{
+				{OperationID: "widget.read", Method: "GET", Path: "/widgets", Summary: "Read"},
+				{OperationID: "widget.readAgain", Method: "GET", Path: "/widgets", Summary: "Read again"},
+			},
+			want: "duplicates GET /widgets",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			plugin := func(ModuleEnv) (ModulePlugin, error) {
+				return ModulePlugin{
+					ID:             "widget",
+					RegisterRoutes: func(*http.ServeMux) {},
+					OpenAPI:        tc.ops,
+				}, nil
+			}
+			_, err := BuildApp(context.Background(), extTestConfig(t), WithModules(plugin))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("BuildApp error = %v, want text %q", err, tc.want)
+			}
+		})
 	}
 }

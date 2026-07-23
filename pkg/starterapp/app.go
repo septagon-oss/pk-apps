@@ -97,12 +97,17 @@ type App struct {
 
 	modules       []string
 	adminBasePath string
+	adminSubject  string
+	appName       string
+	appVersion    string
+	environment   string
 	seedEmail     string
 	seedPassword  string
 
 	// extra holds contributed modules (starterapp.WithModules); Mux mounts
 	// their routes on the shared mux behind the same middleware as the built-ins.
-	extra []ModulePlugin
+	extra             []ModulePlugin
+	openAPIOperations []OpenAPIOperation
 }
 
 // BuildApp constructs every module against the shared SQLite DSN and runs the
@@ -304,6 +309,13 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	if _, err := seed.Run(ctx, tenantMod.Service(), userMod.Service(), seedParams); err != nil {
 		return nil, fmt.Errorf("seed: %w", err)
 	}
+	seededAdmin, err := userMod.Service().GetByEmail(ctx, seed.TenantID, seedParams.AdminEmail)
+	if err != nil {
+		return nil, fmt.Errorf("seed: resolve admin identity: %w", err)
+	}
+	if seededAdmin == nil {
+		return nil, fmt.Errorf("seed: resolve admin identity: seeded user not found")
+	}
 
 	// Compose the catalog. Order in defaults matters only for human-friendly
 	// listings; pk-core's compose pass topologically sorts on declared deps.
@@ -338,7 +350,15 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		builtinIDs[id] = true
 	}
 	var extraPlugins []ModulePlugin
-	env := ModuleEnv{DB: db, Admin: adminReg, Health: healthReg}
+	var openAPIOperations []OpenAPIOperation
+	openAPIRoutes := make(map[string]string)
+	openAPIOperationIDs := make(map[string]string)
+	env := ModuleEnv{
+		DB:     db,
+		Admin:  adminReg,
+		Health: healthReg,
+		Audit:  auditMod.Service(),
+	}
 	for _, build := range appOpts.extra {
 		plugin, err := build(env)
 		if err != nil {
@@ -353,12 +373,21 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		if plugin.RegisterRoutes == nil && plugin.RegisterPublicRoutes == nil {
 			return nil, fmt.Errorf("contributed module %q: RegisterRoutes or RegisterPublicRoutes is required", plugin.ID)
 		}
+		if err := validateOpenAPIOperations(
+			plugin.ID,
+			plugin.OpenAPI,
+			openAPIRoutes,
+			openAPIOperationIDs,
+		); err != nil {
+			return nil, err
+		}
 		builtinIDs[plugin.ID] = true
 		if plugin.Compose != nil {
 			entries = append(entries, pkmodule.Entry{ID: plugin.ID, New: plugin.Compose})
 			modules = append(modules, plugin.ID)
 		}
 		extraPlugins = append(extraPlugins, plugin)
+		openAPIOperations = append(openAPIOperations, plugin.OpenAPI...)
 	}
 
 	bundle := pkmodule.NewBundle(BundleName, entries, modules)
@@ -386,21 +415,26 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	closeOnErr = nil
 
 	app := &App{
-		admin:         adminMod,
-		tenant:        tenantMod,
-		user:          userMod,
-		auditMod:      auditMod,
-		health:        healthMod,
-		authMod:       authMod,
-		apiKey:        apiKeyMod,
-		contentMod:    contentMod,
-		notification:  notificationMod,
-		catalog:       catalog,
-		host:          runtimeHost,
-		db:            db,
-		modules:       modules,
-		adminBasePath: adminMod.BasePath(),
-		extra:         extraPlugins,
+		admin:             adminMod,
+		tenant:            tenantMod,
+		user:              userMod,
+		auditMod:          auditMod,
+		health:            healthMod,
+		authMod:           authMod,
+		apiKey:            apiKeyMod,
+		contentMod:        contentMod,
+		notification:      notificationMod,
+		catalog:           catalog,
+		host:              runtimeHost,
+		db:                db,
+		modules:           modules,
+		adminBasePath:     adminMod.BasePath(),
+		adminSubject:      seededAdmin.ID,
+		appName:           cfg.AppName,
+		appVersion:        cfg.AppVersion,
+		environment:       cfg.Environment,
+		extra:             extraPlugins,
+		openAPIOperations: openAPIOperations,
 	}
 	app.seedEmail, app.seedPassword = seedBannerCredential(cfg, seedParams)
 	return app, nil
@@ -470,7 +504,7 @@ func (a *App) Mux() (http.Handler, error) {
 	// expvar exposes cmdline and memstats, so an unauthenticated scrape is an
 	// information disclosure; a scraper authenticates with an API key like any
 	// other client. (/healthz, /live, /ready stay open for liveness probing.)
-	mux.Handle("/metrics", requireAuthenticated(expvar.Handler()))
+	mux.Handle("/metrics", requireMetricsAccess(expvar.Handler()))
 
 	// /live and /ready are owned by pk-runtime/host. Forward only those two
 	// paths to the host so the rest of our mux stays in control.
@@ -480,7 +514,10 @@ func (a *App) Mux() (http.Handler, error) {
 	mux.Handle("/live", hostHandler)
 	mux.Handle("/ready", hostHandler)
 
-	// Root banner — useful for `curl localhost:8080/` smoke checks.
+	// Machine-readable operation discovery for contributed modules.
+	mux.HandleFunc("/openapi/extensions.json", a.extensionOpenAPIHandler)
+
+	// Root product landing page — useful for browser and curl smoke checks.
 	mux.HandleFunc("/", a.indexHandler)
 
 	// Wrap the whole surface: the identity middleware resolves an API-key or
@@ -490,14 +527,14 @@ func (a *App) Mux() (http.Handler, error) {
 	// Principal the middleware attaches.
 	resolver := identity.Chain(
 		newAPIKeyResolver(a.apiKey.Service()),
-		newSessionResolver(a.authMod.Service()),
+		newSessionResolver(a.authMod.Service(), a.adminSubject),
 	)
 	// The authenticated surface sits behind the mutation gate. When contributed
 	// modules registered public routes, a thin dispatcher checks the public mux
 	// first and serves a match without the gate; everything else falls through
 	// to the gated surface. Both are still wrapped by identity resolution (so a
 	// presented credential is honored on public routes) and the body cap.
-	var routed http.Handler = requireAuthenticatedMutations(mux)
+	var routed http.Handler = requireAuthenticatedMutations(authorizeBuiltinAPI(mux))
 	if havePublic {
 		gated := routed
 		routed = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -515,29 +552,6 @@ func (a *App) Mux() (http.Handler, error) {
 	handler := limitRequestBody(maxRequestBodyBytes,
 		identity.Middleware(resolver)(routed))
 	return handler, nil
-}
-
-// indexHandler renders a minimal HTML index that points operators at the admin
-// UI and lists the composed modules. Anything that is not the root path falls
-// through to a 404 so we do not shadow module APIs.
-func (a *App) indexHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!doctype html>
-<html><head><title>starter-saas</title></head><body>
-<h1>starter-saas</h1>
-<p>PlatformKit OSS monolith composing %d modules.</p>
-<ul>
-  <li><a href="%s">Admin UI</a></li>
-  <li><a href="/healthz">Health</a></li>
-  <li><a href="/metrics">Metrics</a></li>
-</ul>
-<p>Default login: <code>%s</code> / <code>%s</code></p>
-</body></html>`,
-		len(a.modules), a.adminBasePath, a.seedEmail, a.seedPassword)
 }
 
 // ModuleIDs returns the human-ordered list of catalog-composed module IDs.
