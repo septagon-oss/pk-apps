@@ -228,14 +228,37 @@ func TestBuildAppNeutralizesLegacyBootstrapLabelsAndPreservesDurableIDs(t *testi
 	}
 }
 
-func TestBootstrapMigrationReappliesAfterPriorCleanupRevision(t *testing.T) {
+func TestBootstrapMigrationFinalizesPriorCleanupWithoutReplayingLabels(t *testing.T) {
 	ctx := context.Background()
 	cfg := freshConfig(t)
 	createLegacyBootstrapFixture(t, cfg.Database.DSN)
 
+	hasher, err := passhash.NewBcrypt(passhash.MinCost)
+	if err != nil {
+		t.Fatalf("create prior-cleanup password hasher: %v", err)
+	}
+	currentHash, err := hasher.Hash(seed.UserPass)
+	if err != nil {
+		t.Fatalf("hash prior-cleanup password: %v", err)
+	}
+
 	db, err := sql.Open("sqlite", cfg.Database.DSN)
 	if err != nil {
 		t.Fatalf("open prior-cleanup fixture: %v", err)
+	}
+	// Model a completed v3 cleanup followed by deliberate operator changes
+	// back to historical-looking labels. V4 must not infer that those values
+	// are still uncustomized merely because they match the old defaults.
+	if _, err := db.ExecContext(
+		ctx,
+		`UPDATE users
+		 SET pass_hash = ?
+		 WHERE id = ? AND tenant_id = ?`,
+		currentHash,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+	); err != nil {
+		t.Fatalf("model completed prior cleanup: %v", err)
 	}
 	if _, err := db.ExecContext(
 		ctx,
@@ -269,15 +292,14 @@ func TestBootstrapMigrationReappliesAfterPriorCleanupRevision(t *testing.T) {
 
 	migratedTenant, err := app.tenant.Service().Get(ctx, releasedBootstrapTenantID)
 	if err != nil {
-		t.Fatalf("lookup reprocessed tenant: %v", err)
+		t.Fatalf("lookup finalized tenant: %v", err)
 	}
-	if migratedTenant.Slug != seed.TenantSlug || migratedTenant.Name != seed.TenantName {
+	if migratedTenant.Slug != releasedBootstrapTenantSlug ||
+		migratedTenant.Name != releasedBootstrapTenantName {
 		t.Fatalf(
-			"reprocessed tenant = slug %q name %q, want slug %q name %q",
+			"prior-cleanup customization changed to slug %q name %q",
 			migratedTenant.Slug,
 			migratedTenant.Name,
-			seed.TenantSlug,
-			seed.TenantName,
 		)
 	}
 	migratedAdmin, err := app.user.Service().Get(
@@ -286,17 +308,46 @@ func TestBootstrapMigrationReappliesAfterPriorCleanupRevision(t *testing.T) {
 		releasedBootstrapUserID,
 	)
 	if err != nil {
-		t.Fatalf("lookup reprocessed administrator: %v", err)
+		t.Fatalf("lookup finalized administrator: %v", err)
 	}
-	if migratedAdmin.Email != seed.UserEmail ||
-		migratedAdmin.Username != seed.UserName ||
-		migratedAdmin.DisplayName != seed.UserDisplay {
+	if migratedAdmin.Email != releasedBootstrapUserEmail ||
+		migratedAdmin.Username != releasedBootstrapUserName ||
+		migratedAdmin.DisplayName != releasedBootstrapUserDisplay {
 		t.Fatalf(
-			"reprocessed administrator = email %q username %q display %q",
+			"prior-cleanup administrator customization changed to email %q username %q display %q",
 			migratedAdmin.Email,
 			migratedAdmin.Username,
 			migratedAdmin.DisplayName,
 		)
+	}
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		seed.UserPass,
+	); err != nil {
+		t.Fatalf("prior-cleanup password changed: %v", err)
+	}
+	for _, check := range []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "session",
+			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'session_existing' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "API key",
+			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'key_existing' AND revoked_at IS NOT NULL`,
+		},
+	} {
+		var revoked int
+		if err := app.db.QueryRowContext(ctx, check.query).Scan(&revoked); err != nil {
+			t.Fatalf("read prior-cleanup %s: %v", check.name, err)
+		}
+		if revoked != 1 {
+			t.Fatalf("prior-cleanup %s revoked rows = %d, want 1", check.name, revoked)
+		}
 	}
 	var currentRevisionCount int
 	if err := app.db.QueryRowContext(

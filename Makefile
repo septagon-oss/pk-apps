@@ -37,7 +37,17 @@ staticcheck: $(STATICCHECK_PREREQ) | $(TMPDIRS)
 		echo "staticcheck: go list returned no packages"; \
 		exit 1; \
 	fi; \
-	$(GO_ENV) GOFLAGS=-buildvcs=false $(STATICCHECK) $$packages
+	if output="$$( $(GO_ENV) GOFLAGS=-buildvcs=false $(STATICCHECK) ./... 2>&1 )"; then \
+		status=0; \
+	else \
+		status=$$?; \
+	fi; \
+	if [[ -n "$$output" ]]; then printf '%s\n' "$$output"; fi; \
+	if [[ $$status -ne 0 ]]; then exit $$status; fi; \
+	if [[ "$$output" == *"matched no packages"* ]]; then \
+		echo "staticcheck: analyzer matched no packages"; \
+		exit 1; \
+	fi
 
 race: | $(TMPDIRS)
 	$(GO_ENV) go test -race -count=1 ./...

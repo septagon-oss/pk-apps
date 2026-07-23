@@ -19,7 +19,8 @@ import (
 // generic local identity was introduced. They are migration input only: new
 // databases and current runtime behavior use the constants in package seed.
 const (
-	bootstrapIdentityMigrationID = "20260723_bootstrap_labels_v4"
+	bootstrapIdentityMigrationID      = "20260723_bootstrap_labels_v4"
+	priorBootstrapIdentityMigrationID = "20260723_bootstrap_labels_v3"
 
 	legacyBootstrapTenantID     = "tenant_acme"
 	legacyBootstrapTenantSlug   = "acme"
@@ -618,6 +619,45 @@ func migrateBootstrapIdentity(
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("starterapp: finish applied bootstrap identity migration: %w", err)
+		}
+		return nil
+	}
+
+	var priorCleanupApplied int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM starterapp_migrations WHERE id = ?`,
+		priorBootstrapIdentityMigrationID,
+	).Scan(&priorCleanupApplied); err != nil {
+		return fmt.Errorf("starterapp: inspect prior cleanup migration: %w", err)
+	}
+	if priorCleanupApplied != 0 {
+		// Early builds carrying v3 normalized these labels and rotated the
+		// public password, but did not revoke API keys. Revoke credentials
+		// fail-closed without replaying label comparisons: a matching legacy
+		// literal may now be an operator's deliberate post-migration value.
+		if err := revokeCredentials(identity.TenantID, identity.UserID); err != nil {
+			return err
+		}
+		releasedIdentity := bootstrapIdentity{
+			TenantID: legacyBootstrapTenantID,
+			UserID:   legacyBootstrapUserID,
+		}
+		if identity != releasedIdentity {
+			if err := revokeCredentials(releasedIdentity.TenantID, releasedIdentity.UserID); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO starterapp_migrations (id, applied_at) VALUES (?, ?)`,
+			bootstrapIdentityMigrationID,
+			now,
+		); err != nil {
+			return fmt.Errorf("starterapp: record finalized bootstrap identity migration: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("starterapp: finalize prior bootstrap identity migration: %w", err)
 		}
 		return nil
 	}
