@@ -72,7 +72,7 @@ type SeedConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		AppName:     "starter-saas",
-		AppVersion:  "0.3.1",
+		AppVersion:  "0.4.0",
 		Environment: "development",
 		HTTP: HTTPConfig{
 			Addr:            "127.0.0.1:8080",
