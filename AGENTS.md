@@ -11,6 +11,9 @@ front door is [septagon-oss/platformkit](https://github.com/septagon-oss/platfor
 - Consult `reference/custommodule` only for the downstream extension contract.
   It is not a shipped module, product domain, second starter, or alternate
   architecture.
+- `pkg/starterapp/bootstrap_migration.go` contains historical bootstrap
+  literals solely to migrate durable state. They are not current defaults or
+  alternate product examples.
 
 Do not create app binaries, teaching bundles, sample products, client modules,
 or alternate composition paths in this repository. Product-specific code

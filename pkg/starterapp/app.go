@@ -290,6 +290,20 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		return nil, fmt.Errorf("notification module: %w", err)
 	}
 
+	seedParams, err := resolveSeedParams(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := migrateBootstrapIdentity(
+		ctx,
+		db,
+		userMod.Hasher(),
+		seedParams.AdminEmail,
+		seedParams.AdminPassword,
+	); err != nil {
+		return nil, err
+	}
+
 	// Outside development, force Secure on all cookies. A production deployment
 	// typically sits behind a TLS-terminating proxy that may not forward the
 	// scheme, in which case the session cookie would otherwise ship without
@@ -301,14 +315,10 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 
 	// Install the local/bootstrap tenant and administrator. Safe to call on
 	// every boot; production never repairs an existing password.
-	seedParams, err := resolveSeedParams(cfg)
-	if err != nil {
-		return nil, err
-	}
 	if _, err := seed.Run(ctx, tenantMod.Service(), userMod.Service(), seedParams); err != nil {
 		return nil, fmt.Errorf("seed: %w", err)
 	}
-	seededAdmin, err := userMod.Service().GetByEmail(ctx, seed.TenantID, seedParams.AdminEmail)
+	seededAdmin, err := userMod.Service().Get(ctx, seed.TenantID, seed.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("seed: resolve admin identity: %w", err)
 	}
@@ -436,6 +446,9 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		openAPIOperations: openAPIOperations,
 	}
 	app.seedEmail, app.seedPassword = seedBannerCredential(cfg, seedParams)
+	if cfg.Environment == "development" {
+		app.seedEmail = seededAdmin.Email
+	}
 	return app, nil
 }
 

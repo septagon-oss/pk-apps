@@ -96,10 +96,16 @@ func Run(ctx context.Context, tenantSvc tenant.TenantService, userSvc user.UserS
 }
 
 // ensureTenant creates the bootstrap tenant if it is not already present,
-// keyed on its stable slug. An existing tenant is left untouched. It reports
-// whether it created the tenant.
+// keyed first on its stable ID. Looking up the ID before the default slug
+// preserves an operator-customized slug across upgrades. An existing tenant is
+// left untouched. It reports whether it created the tenant.
 func ensureTenant(ctx context.Context, tenantSvc tenant.TenantService) (bool, error) {
-	existing, err := tenantSvc.GetBySlug(ctx, TenantSlug)
+	existing, err := tenantSvc.Get(ctx, TenantID)
+	if err == nil && existing != nil {
+		return false, nil
+	}
+
+	existing, err = tenantSvc.GetBySlug(ctx, TenantSlug)
 	if err == nil && existing != nil {
 		return false, nil
 	}
@@ -114,14 +120,15 @@ func ensureTenant(ctx context.Context, tenantSvc tenant.TenantService) (bool, er
 	return true, nil
 }
 
-// ensureAdminUser guarantees the admin user exists (keyed on its tenant-scoped
-// email). A NEW admin is created with params.AdminPassword. An EXISTING admin
-// is left as-is — its password is only reset when params.RepairPassword is set
-// (development self-heal). This is the fix for the v0.1.0 backdoor where the
-// password was re-asserted unconditionally on every boot, silently reverting an
-// operator's change. It reports whether it created the admin.
+// ensureAdminUser guarantees the stable bootstrap user exists. A NEW admin is
+// created with params.AdminPassword. An EXISTING admin is left as-is — its
+// password is only reset when params.RepairPassword is set (development
+// self-heal). Looking up the stable ID preserves a customized email across
+// upgrades. This is the fix for the v0.1.0 backdoor where the password was
+// re-asserted unconditionally on every boot, silently reverting an operator's
+// change. It reports whether it created the admin.
 func ensureAdminUser(ctx context.Context, userSvc user.UserService, params Params) (bool, error) {
-	existing, err := userSvc.GetByEmail(ctx, TenantID, params.AdminEmail)
+	existing, err := userSvc.Get(ctx, TenantID, UserID)
 	if err == nil && existing != nil {
 		if params.RepairPassword {
 			if vErr := userSvc.VerifyPassword(ctx, TenantID, existing.ID, params.AdminPassword); vErr != nil {
