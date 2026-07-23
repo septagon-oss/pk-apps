@@ -175,6 +175,16 @@ func TestBuildAppNeutralizesLegacyBootstrapLabelsAndPreservesDurableIDs(t *testi
 	if !historicalSessionRevokedAt.Valid {
 		t.Fatal("session issued under the historical default password was not revoked")
 	}
+	var historicalAPIKeyRevokedAt sql.NullTime
+	if err := app.db.QueryRowContext(
+		ctx,
+		`SELECT revoked_at FROM api_keys WHERE id = 'key_existing'`,
+	).Scan(&historicalAPIKeyRevokedAt); err != nil {
+		t.Fatalf("read migrated historical API key: %v", err)
+	}
+	if !historicalAPIKeyRevokedAt.Valid {
+		t.Fatal("API key minted through the historical default password was not revoked")
+	}
 
 	var markerCount int
 	if err := app.db.QueryRowContext(
@@ -328,6 +338,16 @@ func TestBootstrapMigrationPreservesCustomizedProductionIdentity(t *testing.T) {
 	}
 	if historicalSessionRevokedAt.Valid {
 		t.Fatal("migration revoked a session after the bootstrap password had been rotated")
+	}
+	var historicalAPIKeyRevokedAt sql.NullTime
+	if err := app.db.QueryRowContext(
+		ctx,
+		`SELECT revoked_at FROM api_keys WHERE id = 'key_existing'`,
+	).Scan(&historicalAPIKeyRevokedAt); err != nil {
+		t.Fatalf("read customized historical API key: %v", err)
+	}
+	if historicalAPIKeyRevokedAt.Valid {
+		t.Fatal("migration revoked an API key after the bootstrap password had been rotated")
 	}
 
 	assertDurableBootstrapReferencesPreserved(t, app.db, 1)

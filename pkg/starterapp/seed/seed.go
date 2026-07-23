@@ -86,8 +86,11 @@ func Run(ctx context.Context, tenantSvc tenant.TenantService, userSvc user.UserS
 	if params.AdminEmail == "" {
 		return res, errors.New("seed: admin email is required")
 	}
-	if !strings.Contains(params.AdminEmail, "@") {
-		return res, fmt.Errorf("seed: admin email %q must contain '@'", params.AdminEmail)
+	at := strings.LastIndex(params.AdminEmail, "@")
+	if strings.Count(params.AdminEmail, "@") != 1 ||
+		at <= 0 ||
+		at == len(params.AdminEmail)-1 {
+		return res, fmt.Errorf("seed: admin email %q must contain a nonempty local part and domain", params.AdminEmail)
 	}
 	if params.AdminPassword == "" {
 		return res, errors.New("seed: admin password is required")

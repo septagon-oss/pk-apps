@@ -128,6 +128,27 @@ func TestRunRejectsInvalidParametersBeforeCreatingTenant(t *testing.T) {
 			},
 		},
 		{
+			name: "missing email local part",
+			params: Params{
+				AdminEmail:    "@local.test",
+				AdminPassword: "valid-password",
+			},
+		},
+		{
+			name: "missing email domain",
+			params: Params{
+				AdminEmail:    "operator@",
+				AdminPassword: "valid-password",
+			},
+		},
+		{
+			name: "multiple email separators",
+			params: Params{
+				AdminEmail:    "operator@local@test",
+				AdminPassword: "valid-password",
+			},
+		},
+		{
 			name: "overlong UTF-8 password",
 			params: Params{
 				AdminEmail:    UserEmail,

@@ -477,7 +477,7 @@ func migrateBootstrapIdentity(
 	}
 	identityIncomplete := selectedTenantCount == 0 || selectedUserCount == 0
 	now := time.Now().UTC()
-	revokeRecreatedIdentityCredentials := func() error {
+	revokeBootstrapCredentials := func() error {
 		if _, err := tx.ExecContext(
 			ctx,
 			`UPDATE auth_sessions
@@ -487,7 +487,7 @@ func migrateBootstrapIdentity(
 			identity.TenantID,
 			identity.UserID,
 		); err != nil {
-			return fmt.Errorf("starterapp: revoke sessions for recreated bootstrap identity: %w", err)
+			return fmt.Errorf("starterapp: revoke bootstrap identity sessions: %w", err)
 		}
 		if _, err := tx.ExecContext(
 			ctx,
@@ -498,7 +498,7 @@ func migrateBootstrapIdentity(
 			identity.TenantID,
 			identity.UserID,
 		); err != nil {
-			return fmt.Errorf("starterapp: revoke API keys for recreated bootstrap identity: %w", err)
+			return fmt.Errorf("starterapp: revoke bootstrap identity API keys: %w", err)
 		}
 		return nil
 	}
@@ -513,7 +513,7 @@ func migrateBootstrapIdentity(
 	}
 	if alreadyApplied != 0 {
 		if identityIncomplete {
-			if err := revokeRecreatedIdentityCredentials(); err != nil {
+			if err := revokeBootstrapCredentials(); err != nil {
 				return err
 			}
 		}
@@ -716,21 +716,12 @@ func migrateBootstrapIdentity(
 			return fmt.Errorf("starterapp: neutralize bootstrap administrator labels: %w", err)
 		}
 	}
-	if identityIncomplete {
-		if err := revokeRecreatedIdentityCredentials(); err != nil {
+	if identityIncomplete || legacyPasswordWasDefault {
+		// The released password was public. Any long-lived API key minted
+		// through it must be treated as compromised alongside browser sessions.
+		// Recreated identity rows require the same fail-closed invalidation.
+		if err := revokeBootstrapCredentials(); err != nil {
 			return err
-		}
-	} else if legacyPasswordWasDefault {
-		if _, err := tx.ExecContext(
-			ctx,
-			`UPDATE auth_sessions
-			 SET revoked_at = ?
-			 WHERE tenant_id = ? AND user_id = ? AND revoked_at IS NULL`,
-			now,
-			identity.TenantID,
-			identity.UserID,
-		); err != nil {
-			return fmt.Errorf("starterapp: revoke sessions for migrated bootstrap administrator: %w", err)
 		}
 	}
 

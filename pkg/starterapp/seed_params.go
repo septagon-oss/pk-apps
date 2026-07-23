@@ -33,8 +33,12 @@ func resolveSeedParams(cfg *Config) (seed.Params, error) {
 	if email == "" {
 		email = seed.UserEmail
 	}
-	if !strings.Contains(email, "@") {
-		return seed.Params{}, fmt.Errorf("starterapp: seed.admin_email %q must contain '@'", email)
+	at := strings.LastIndex(email, "@")
+	if strings.Count(email, "@") != 1 || at <= 0 || at == len(email)-1 {
+		return seed.Params{}, fmt.Errorf(
+			"starterapp: seed.admin_email %q must contain a nonempty local part and domain",
+			email,
+		)
 	}
 	dev := cfg.Environment == "development"
 	password := cfg.Seed.AdminPassword

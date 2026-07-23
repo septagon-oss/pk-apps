@@ -66,7 +66,13 @@ func TestResolveSeedParamsFailsClosedOutsideDevelopment(t *testing.T) {
 		t.Fatal("production must never repair (re-assert) the password")
 	}
 
-	for _, email := range []string{"   ", "missing-at-sign"} {
+	for _, email := range []string{
+		"   ",
+		"missing-at-sign",
+		"@customer.test",
+		"operator@",
+		"operator@customer@test",
+	} {
 		_, err := resolveSeedParams(&Config{
 			Environment: "production",
 			Seed: SeedConfig{
