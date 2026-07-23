@@ -98,6 +98,21 @@ func TestOpenAPISpecVersionMatchesDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestOpenAPIPasswordLimitUsesUTF8Bytes(t *testing.T) {
+	t.Parallel()
+
+	spec, err := os.ReadFile(filepath.Join("..", "..", "api", "openapi.yaml"))
+	if err != nil {
+		t.Fatalf("read spec: %v", err)
+	}
+	if !strings.Contains(string(spec), "x-max-utf8-bytes: 72") {
+		t.Fatal("UserInput.password is missing its 72-byte UTF-8 limit")
+	}
+	if strings.Contains(string(spec), "maxLength: 72") {
+		t.Fatal("password byte limit is incorrectly documented as a character-count maxLength")
+	}
+}
+
 func TestOpenAPISpecMatchesApp(t *testing.T) {
 	t.Parallel()
 	ops := specOps(t)

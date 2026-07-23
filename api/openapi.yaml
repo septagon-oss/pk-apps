@@ -642,8 +642,8 @@ components:
         password:
           type: string
           format: password
-          maxLength: 72
-          description: Optional login credential; omit on update to keep the current password.
+          x-max-utf8-bytes: 72
+          description: Optional login credential, limited to 72 UTF-8 bytes; omit on update to keep the current password.
         active: { type: boolean }
 
     APIKey:
