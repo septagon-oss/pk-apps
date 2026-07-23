@@ -76,6 +76,20 @@ func TestComposeAllNineModulesIntoCatalog(t *testing.T) {
 			t.Errorf("catalog missing module %q", id)
 		}
 	}
+	metadata := app.host.ModuleMetadata()
+	if len(metadata) != len(want) {
+		t.Fatalf("runtime metadata length = %d, want %d", len(metadata), len(want))
+	}
+	for _, module := range metadata {
+		if module.Version != cfg.AppVersion {
+			t.Errorf(
+				"runtime module %q version = %q, want release %q",
+				module.ID,
+				module.Version,
+				cfg.AppVersion,
+			)
+		}
+	}
 }
 
 // TestSeedCreatesTenantAndUser checks that the first-boot seed populates the

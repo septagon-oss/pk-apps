@@ -119,7 +119,7 @@ func TestWithModulesContributesAModule(t *testing.T) {
 	}
 }
 
-func TestWithModulesPreservesPublishedPortContract(t *testing.T) {
+func TestWithModulesUsesPublishedPortContractVersions(t *testing.T) {
 	t.Parallel()
 
 	plugin := func(ModuleEnv) (ModulePlugin, error) {
@@ -130,12 +130,12 @@ func TestWithModulesPreservesPublishedPortContract(t *testing.T) {
 					pkmodule.Metadata{ID: "published_contract_consumer", Version: "0.0.0"},
 					pkmodule.WithDependencies(
 						pkmodule.RequiresPort[audit.AuditService](pkmodule.PortSpec{
-							Version:           "0.0.0",
+							Version:           audit.ModuleVersion,
 							Purpose:           "Consume the published audit contract.",
 							PreferredProvider: "audit_management",
 						}),
 						pkmodule.RequiresPort[portslib.AdminRegistrar](pkmodule.PortSpec{
-							Version:           "0.0.0",
+							Version:           portslib.AdminRegistrarContractVersion,
 							Purpose:           "Consume the published admin contract.",
 							PreferredProvider: "admin_management",
 						}),
@@ -152,7 +152,7 @@ func TestWithModulesPreservesPublishedPortContract(t *testing.T) {
 		WithModules(plugin),
 	)
 	if err != nil {
-		t.Fatalf("BuildApp with published 0.0.0 port contracts: %v", err)
+		t.Fatalf("BuildApp with published port contracts: %v", err)
 	}
 	defer app.Close()
 }
