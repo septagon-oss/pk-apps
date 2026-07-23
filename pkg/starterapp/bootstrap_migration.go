@@ -19,6 +19,7 @@ import (
 // generic local identity was introduced. They are migration input only: new
 // databases and current runtime behavior use the constants in package seed.
 const (
+	bootstrapCredentialMigrationID    = "20260723_bootstrap_credentials_v5"
 	bootstrapIdentityMigrationID      = "20260723_bootstrap_labels_v4"
 	priorBootstrapIdentityMigrationID = "20260723_bootstrap_labels_v3"
 
@@ -42,7 +43,6 @@ type bootstrapIdentity struct {
 
 type bootstrapPasswordHasher interface {
 	Hash(plaintext string) (string, error)
-	Verify(plaintext, encoded string) error
 }
 
 // resolveBootstrapIdentity chooses the IDs to use before any module binds
@@ -485,10 +485,12 @@ func releasedBootstrapReferencesExist(ctx context.Context, db *sql.DB) (bool, er
 // essential for contributed modules: the starter cannot discover every
 // downstream table that may contain tenant_id, owner_id, or another reference.
 //
-// Customized names, administrator identities, rotated passwords, timestamps,
-// and all tenant-owned rows remain unchanged. When the released default
-// password is still present, it is replaced with the current configured
-// password and sessions issued under it are revoked in the same transaction.
+// Customized names, administrator identities, timestamps, and all tenant-owned
+// rows remain unchanged. On a direct pre-ledger upgrade, the selected
+// administrator is re-keyed to the current configured password and all of its
+// credentials are revoked in the same transaction: a public bootstrap session
+// could have created or reset any candidate before it became adminSubject, so
+// credential lineage cannot be proven safe from the stored rows alone.
 func migrateBootstrapIdentity(
 	ctx context.Context,
 	db *sql.DB,
@@ -577,6 +579,14 @@ func migrateBootstrapIdentity(
 	}
 	identityIncomplete := selectedTenantCount == 0 || selectedUserCount == 0
 	now := time.Now().UTC()
+	releasedIdentity := bootstrapIdentity{
+		TenantID: legacyBootstrapTenantID,
+		UserID:   legacyBootstrapUserID,
+	}
+	neutralIdentity := bootstrapIdentity{
+		TenantID: seed.TenantID,
+		UserID:   seed.UserID,
+	}
 	revokeCredentials := func(tenantID, userID string) error {
 		if _, err := tx.ExecContext(
 			ctx,
@@ -602,61 +612,95 @@ func migrateBootstrapIdentity(
 		}
 		return nil
 	}
-	revokeCredentialsThroughMigration := func(tenantID, userID, migrationID string) error {
-		for _, credential := range []struct {
-			table     string
-			timeField string
-			label     string
-		}{
-			{table: "auth_sessions", timeField: "issued_at", label: "sessions"},
-			{table: "api_keys", timeField: "created_at", label: "API keys"},
-		} {
-			// Both the v3 ledger and credential stores write UTC time.Time
-			// values through the same SQLite driver, yielding a shared,
-			// lexicographically sortable representation.
+	resetSelectedCredential := func() error {
+		if selectedUserCount != 0 {
+			replacementPassHash, err := hasher.Hash(adminPassword)
+			if err != nil {
+				return fmt.Errorf("starterapp: hash replacement bootstrap password: %w", err)
+			}
 			if _, err := tx.ExecContext(
 				ctx,
-				`UPDATE `+credential.table+`
-				 SET revoked_at = ?
-				 WHERE tenant_id = ?
-				   AND user_id = ?
-				   AND revoked_at IS NULL
-				   AND `+credential.timeField+` <= (
-					 SELECT applied_at
-					 FROM starterapp_migrations
-					 WHERE id = ?
-				   )`,
-				now,
-				tenantID,
-				userID,
-				migrationID,
+				`UPDATE users
+				 SET pass_hash = ?
+				 WHERE id = ? AND tenant_id = ?`,
+				replacementPassHash,
+				identity.UserID,
+				identity.TenantID,
 			); err != nil {
-				return fmt.Errorf(
-					"starterapp: revoke prior bootstrap identity %s: %w",
-					credential.label,
-					err,
-				)
+				return fmt.Errorf("starterapp: reset bootstrap password: %w", err)
 			}
 		}
-		return nil
+		return revokeCredentials(identity.TenantID, identity.UserID)
+	}
+	retireSupersededReleasedCredential := func() error {
+		if identity == releasedIdentity {
+			return nil
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE users
+			 SET pass_hash = '', active = 0
+			 WHERE id = ? AND tenant_id = ?`,
+			releasedIdentity.UserID,
+			releasedIdentity.TenantID,
+		); err != nil {
+			return fmt.Errorf("starterapp: retire superseded bootstrap credential: %w", err)
+		}
+		// Credentials can outlive a deleted user row and request resolvers do
+		// not necessarily re-read it. Revoke the pair even when UPDATE matched
+		// no account.
+		return revokeCredentials(
+			releasedIdentity.TenantID,
+			releasedIdentity.UserID,
+		)
+	}
+	finalizeMarkedCredentialCleanup := func() error {
+		// A complete neutral identity carrying v3 or v4 was created after the
+		// retired public bootstrap identity had already been removed from the
+		// fresh-install path. Its credentials therefore have no released-login
+		// lineage and must survive this one-time migration.
+		if identity == neutralIdentity {
+			if !identityIncomplete {
+				return nil
+			}
+			if selectedUserCount == 0 {
+				return resetSelectedCredential()
+			}
+			// A missing tenant invalidates the current authorization context,
+			// so retire its live tokens before seed repairs the row. The
+			// surviving user still proves password continuity, however; never
+			// re-assert the first-boot password merely to recreate the tenant.
+			return revokeCredentials(identity.TenantID, identity.UserID)
+		}
+		// Legacy-derived identities are different. Early builds carrying v3
+		// normalized their labels and rotated the public password, but did not
+		// revoke API keys. A surviving users:write key could replace the
+		// password and mint a session after either marker, so neither timestamps
+		// nor a non-public hash prove descendant credentials safe. Re-key the
+		// selected owner and revoke the family. Do not replay label comparisons:
+		// historical-looking labels may now be deliberate operator values.
+		if err := resetSelectedCredential(); err != nil {
+			return err
+		}
+		return retireSupersededReleasedCredential()
 	}
 
-	var alreadyApplied int
+	var credentialCleanupApplied int
 	if err := tx.QueryRowContext(
 		ctx,
 		`SELECT COUNT(*) FROM starterapp_migrations WHERE id = ?`,
-		bootstrapIdentityMigrationID,
-	).Scan(&alreadyApplied); err != nil {
-		return fmt.Errorf("starterapp: inspect migration ledger: %w", err)
+		bootstrapCredentialMigrationID,
+	).Scan(&credentialCleanupApplied); err != nil {
+		return fmt.Errorf("starterapp: inspect credential cleanup migration: %w", err)
 	}
-	if alreadyApplied != 0 {
+	if credentialCleanupApplied != 0 {
 		if identityIncomplete {
 			if err := revokeCredentials(identity.TenantID, identity.UserID); err != nil {
 				return err
 			}
 		}
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("starterapp: finish applied bootstrap identity migration: %w", err)
+			return fmt.Errorf("starterapp: finish applied bootstrap credential migration: %w", err)
 		}
 		return nil
 	}
@@ -669,64 +713,36 @@ func migrateBootstrapIdentity(
 	).Scan(&priorCleanupApplied); err != nil {
 		return fmt.Errorf("starterapp: inspect prior cleanup migration: %w", err)
 	}
-	if priorCleanupApplied != 0 {
-		// Early builds carrying v3 normalized these labels and rotated the
-		// public password, but did not revoke API keys. Do not replay label
-		// comparisons: a matching legacy literal may now be an operator's
-		// deliberate post-migration value.
-		publicPasswordStillActive := false
-		if selectedUserCount != 0 {
-			var selectedPassHash string
-			if err := tx.QueryRowContext(
-				ctx,
-				`SELECT pass_hash FROM users WHERE id = ? AND tenant_id = ?`,
-				identity.UserID,
-				identity.TenantID,
-			).Scan(&selectedPassHash); err != nil {
-				return fmt.Errorf("starterapp: inspect finalized bootstrap password: %w", err)
-			}
-			if hasher.Verify(legacyBootstrapUserPassword, selectedPassHash) == nil {
-				publicPasswordStillActive = true
-				replacementPassHash, err := hasher.Hash(adminPassword)
-				if err != nil {
-					return fmt.Errorf("starterapp: hash finalized bootstrap password: %w", err)
-				}
-				if _, err := tx.ExecContext(
-					ctx,
-					`UPDATE users
-					 SET pass_hash = ?
-					 WHERE id = ? AND tenant_id = ?`,
-					replacementPassHash,
-					identity.UserID,
-					identity.TenantID,
-				); err != nil {
-					return fmt.Errorf("starterapp: rotate finalized bootstrap password: %w", err)
-				}
-			}
-		}
-		if identityIncomplete || publicPasswordStillActive {
-			if err := revokeCredentials(identity.TenantID, identity.UserID); err != nil {
-				return err
-			}
-		} else if err := revokeCredentialsThroughMigration(
-			identity.TenantID,
-			identity.UserID,
-			priorBootstrapIdentityMigrationID,
-		); err != nil {
+
+	var identityCleanupApplied int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM starterapp_migrations WHERE id = ?`,
+		bootstrapIdentityMigrationID,
+	).Scan(&identityCleanupApplied); err != nil {
+		return fmt.Errorf("starterapp: inspect identity cleanup migration: %w", err)
+	}
+	if identityCleanupApplied != 0 {
+		if err := finalizeMarkedCredentialCleanup(); err != nil {
 			return err
 		}
-		releasedIdentity := bootstrapIdentity{
-			TenantID: legacyBootstrapTenantID,
-			UserID:   legacyBootstrapUserID,
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO starterapp_migrations (id, applied_at) VALUES (?, ?)`,
+			bootstrapCredentialMigrationID,
+			now,
+		); err != nil {
+			return fmt.Errorf("starterapp: record bootstrap credential migration: %w", err)
 		}
-		if identity != releasedIdentity {
-			if err := revokeCredentialsThroughMigration(
-				releasedIdentity.TenantID,
-				releasedIdentity.UserID,
-				priorBootstrapIdentityMigrationID,
-			); err != nil {
-				return err
-			}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("starterapp: finalize bootstrap credential migration: %w", err)
+		}
+		return nil
+	}
+
+	if priorCleanupApplied != 0 {
+		if err := finalizeMarkedCredentialCleanup(); err != nil {
+			return err
 		}
 		if _, err := tx.ExecContext(
 			ctx,
@@ -735,6 +751,14 @@ func migrateBootstrapIdentity(
 			now,
 		); err != nil {
 			return fmt.Errorf("starterapp: record finalized bootstrap identity migration: %w", err)
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO starterapp_migrations (id, applied_at) VALUES (?, ?)`,
+			bootstrapCredentialMigrationID,
+			now,
+		); err != nil {
+			return fmt.Errorf("starterapp: record finalized bootstrap credential migration: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("starterapp: finalize prior bootstrap identity migration: %w", err)
@@ -881,7 +905,6 @@ func migrateBootstrapIdentity(
 	replacementName := legacyUserName
 	replacementDisplay := legacyUserDisplay
 	replacementPassHash := legacyPassHash
-	legacyPasswordWasDefault := false
 	if legacyUserExists {
 		if legacyUserEmail == legacyBootstrapUserEmail {
 			replacementEmail, err = availableEmail(adminEmail)
@@ -897,14 +920,6 @@ func migrateBootstrapIdentity(
 		}
 		if legacyUserDisplay == legacyBootstrapUserDisplay {
 			replacementDisplay = seed.UserDisplay
-		}
-
-		if hasher.Verify(legacyBootstrapUserPassword, legacyPassHash) == nil {
-			legacyPasswordWasDefault = true
-			replacementPassHash, err = hasher.Hash(adminPassword)
-			if err != nil {
-				return fmt.Errorf("starterapp: hash replacement bootstrap password: %w", err)
-			}
 		}
 	}
 
@@ -935,26 +950,21 @@ func migrateBootstrapIdentity(
 			return fmt.Errorf("starterapp: neutralize bootstrap administrator labels: %w", err)
 		}
 	}
-	if identityIncomplete || legacyPasswordWasDefault {
-		// The released password was public. Any long-lived API key minted
-		// through it must be treated as compromised alongside browser sessions.
-		// Recreated identity rows require the same fail-closed invalidation.
-		if err := revokeCredentials(identity.TenantID, identity.UserID); err != nil {
-			return err
-		}
+	// The no-marker path cannot authenticate the provenance of the selected
+	// administrator. A public bootstrap session in an earlier build could have
+	// created a replacement owner, changed its password, and minted credentials
+	// before this resolver promoted it to adminSubject. Re-key every existing
+	// selected owner and revoke its entire credential family before certifying
+	// v5. For an incomplete identity this still revokes any orphaned credentials;
+	// seed.Run creates the missing row after this transaction.
+	if err := resetSelectedCredential(); err != nil {
+		return err
 	}
-	releasedIdentity := bootstrapIdentity{
-		TenantID: legacyBootstrapTenantID,
-		UserID:   legacyBootstrapUserID,
-	}
-	if identity != releasedIdentity {
-		// A replacement or collision-safe identity must not leave credentials
-		// for the released pair usable. The old session can still authenticate
-		// to contributed routes, and an old API key can retain data scopes even
-		// though neither credential receives administrator scope.
-		if err := revokeCredentials(releasedIdentity.TenantID, releasedIdentity.UserID); err != nil {
-			return err
-		}
+	// A replacement or collision-safe identity must not leave the released
+	// login or any descendant credentials usable. Preserve its data row for
+	// referential integrity, but require an operator to re-enable it explicitly.
+	if err := retireSupersededReleasedCredential(); err != nil {
+		return err
 	}
 
 	if _, err := tx.ExecContext(
@@ -964,6 +974,14 @@ func migrateBootstrapIdentity(
 		now,
 	); err != nil {
 		return fmt.Errorf("starterapp: record bootstrap identity migration: %w", err)
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO starterapp_migrations (id, applied_at) VALUES (?, ?)`,
+		bootstrapCredentialMigrationID,
+		now,
+	); err != nil {
+		return fmt.Errorf("starterapp: record bootstrap credential migration: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("starterapp: commit bootstrap identity migration: %w", err)

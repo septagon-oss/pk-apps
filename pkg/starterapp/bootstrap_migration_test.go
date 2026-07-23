@@ -356,12 +356,12 @@ func TestBootstrapMigrationFinalizesPriorCleanupWithoutReplayingLabels(t *testin
 		},
 		{
 			name:  "post-v3 session",
-			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'session_after_v3' AND revoked_at IS NULL`,
+			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'session_after_v3' AND revoked_at IS NOT NULL`,
 			want:  1,
 		},
 		{
 			name:  "post-v3 API key",
-			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'key_after_v3' AND revoked_at IS NULL`,
+			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'key_after_v3' AND revoked_at IS NOT NULL`,
 			want:  1,
 		},
 	} {
@@ -386,64 +386,346 @@ func TestBootstrapMigrationFinalizesPriorCleanupWithoutReplayingLabels(t *testin
 	}
 }
 
-func TestBootstrapMigrationFinalizesFreshPriorCleanupPreservesCredentials(t *testing.T) {
+func TestBootstrapMigrationPreservesCleanNeutralPasswordAcrossV5(t *testing.T) {
+	for _, migration := range []struct {
+		name          string
+		id            string
+		missingTenant bool
+	}{
+		{name: "v3", id: priorBootstrapIdentityMigrationID},
+		{name: "v4", id: bootstrapIdentityMigrationID},
+		{name: "v3_missing_tenant", id: priorBootstrapIdentityMigrationID, missingTenant: true},
+		{name: "v4_missing_tenant", id: bootstrapIdentityMigrationID, missingTenant: true},
+	} {
+		t.Run(migration.name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := freshConfig(t)
+			cfg.Environment = "production"
+			cfg.Seed.AdminPassword = "stale-first-boot-password"
+			first, err := BuildApp(ctx, cfg)
+			if err != nil {
+				t.Fatalf("first BuildApp(): %v", err)
+			}
+			if err := first.user.Service().SetPassword(
+				ctx,
+				seed.TenantID,
+				seed.UserID,
+				"operator-rotated-password",
+			); err != nil {
+				t.Fatalf("rotate neutral administrator password: %v", err)
+			}
+			session, err := first.authMod.Service().Login(ctx, seed.TenantID, auth.Credentials{
+				Email:    seed.UserEmail,
+				Password: "operator-rotated-password",
+			})
+			if err != nil {
+				t.Fatalf("create neutral administrator session: %v", err)
+			}
+			plaintext, key, err := first.apiKey.Service().Issue(
+				ctx,
+				seed.TenantID,
+				seed.UserID,
+				"operator-integration",
+				[]string{"content:read"},
+				0,
+			)
+			if err != nil {
+				t.Fatalf("create neutral administrator API key: %v", err)
+			}
+			if _, err := first.db.ExecContext(
+				ctx,
+				`DELETE FROM starterapp_migrations WHERE id = ?`,
+				bootstrapCredentialMigrationID,
+			); err != nil {
+				t.Fatalf("remove v5 marker: %v", err)
+			}
+			if migration.id == priorBootstrapIdentityMigrationID {
+				if _, err := first.db.ExecContext(
+					ctx,
+					`UPDATE starterapp_migrations
+					 SET id = ?, applied_at = ?
+					 WHERE id = ?`,
+					priorBootstrapIdentityMigrationID,
+					time.Now().UTC(),
+					bootstrapIdentityMigrationID,
+				); err != nil {
+					t.Fatalf("model clean v3 migration: %v", err)
+				}
+			}
+			if migration.missingTenant {
+				if _, err := first.db.ExecContext(
+					ctx,
+					`DELETE FROM tenants WHERE id = ?`,
+					seed.TenantID,
+				); err != nil {
+					t.Fatalf("remove neutral tenant: %v", err)
+				}
+			}
+			if err := first.Close(); err != nil {
+				t.Fatalf("close first app: %v", err)
+			}
+
+			second, err := BuildApp(ctx, cfg)
+			if err != nil {
+				t.Fatalf("BuildApp() after clean %s state: %v", migration.name, err)
+			}
+			defer second.Close()
+			if err := second.user.Service().VerifyPassword(
+				ctx,
+				seed.TenantID,
+				seed.UserID,
+				"operator-rotated-password",
+			); err != nil {
+				t.Fatalf("operator-rotated password changed: %v", err)
+			}
+			if err := second.user.Service().VerifyPassword(
+				ctx,
+				seed.TenantID,
+				seed.UserID,
+				cfg.Seed.AdminPassword,
+			); err == nil {
+				t.Fatal("stale first-boot password was re-asserted")
+			}
+			if migration.missingTenant {
+				if _, err := second.authMod.Service().ValidateSession(ctx, session.ID); err == nil {
+					t.Fatal("session survived a missing tenant authorization boundary")
+				}
+				if _, err := second.apiKey.Service().Verify(ctx, plaintext); err == nil {
+					t.Fatal("API key survived a missing tenant authorization boundary")
+				}
+			} else {
+				if _, err := second.authMod.Service().ValidateSession(ctx, session.ID); err != nil {
+					t.Fatalf("legitimate session was revoked: %v", err)
+				}
+				verifiedKey, err := second.apiKey.Service().Verify(ctx, plaintext)
+				if err != nil {
+					t.Fatalf("legitimate API key was revoked: %v", err)
+				}
+				if verifiedKey.ID != key.ID {
+					t.Fatalf("verified API key ID = %q, want %q", verifiedKey.ID, key.ID)
+				}
+			}
+			var v5Count int
+			if err := second.db.QueryRowContext(
+				ctx,
+				`SELECT COUNT(*) FROM starterapp_migrations WHERE id = ?`,
+				bootstrapCredentialMigrationID,
+			).Scan(&v5Count); err != nil {
+				t.Fatalf("read v5 marker: %v", err)
+			}
+			if v5Count != 1 {
+				t.Fatalf("v5 marker rows = %d, want 1", v5Count)
+			}
+		})
+	}
+}
+
+func TestBootstrapMigrationInvalidatesPasswordDescendedFromV3APIKey(t *testing.T) {
 	ctx := context.Background()
 	cfg := freshConfig(t)
-	first, err := BuildApp(ctx, cfg)
+	cfg.Environment = "production"
+	cfg.Seed.AdminPassword = "configured-owner-password"
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	hasher, err := passhash.NewBcrypt(passhash.MinCost)
 	if err != nil {
-		t.Fatalf("first BuildApp(): %v", err)
+		t.Fatalf("create descendant password hasher: %v", err)
 	}
-	if _, err := first.db.ExecContext(
-		ctx,
-		`UPDATE starterapp_migrations
-		 SET id = ?, applied_at = ?
-		 WHERE id = ?`,
-		priorBootstrapIdentityMigrationID,
-		time.Now().UTC(),
-		bootstrapIdentityMigrationID,
-	); err != nil {
-		t.Fatalf("model fresh v3 migration: %v", err)
-	}
-	session, err := first.authMod.Service().Login(ctx, seed.TenantID, auth.Credentials{
-		Email:    seed.UserEmail,
-		Password: seed.UserPass,
-	})
+	attackerHash, err := hasher.Hash("attacker-controlled-password")
 	if err != nil {
-		t.Fatalf("create post-v3 session: %v", err)
+		t.Fatalf("hash descendant password: %v", err)
 	}
-	_, key, err := first.apiKey.Service().Issue(
-		ctx,
-		seed.TenantID,
-		seed.UserID,
-		"post-v3",
-		[]string{"content:read"},
-		0,
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open descendant fixture: %v", err)
+	}
+	appliedAt := time.Now().UTC().Add(-time.Minute)
+	recordPriorBootstrapCleanup(
+		t,
+		db,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		appliedAt,
 	)
-	if err != nil {
-		t.Fatalf("create post-v3 API key: %v", err)
+	// Model the effect of a users:write key that survived v3: it replaces the
+	// selected owner's password, then that password mints a post-marker session.
+	if _, err := db.ExecContext(
+		ctx,
+		`UPDATE users
+		 SET pass_hash = ?
+		 WHERE id = ? AND tenant_id = ?`,
+		attackerHash,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+	); err != nil {
+		t.Fatalf("replace password through surviving key: %v", err)
 	}
-	if err := first.Close(); err != nil {
-		t.Fatalf("close first app: %v", err)
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO auth_sessions
+		 (id, user_id, tenant_id, issued_at, expires_at, revoked_at)
+		 VALUES ('descendant_session', ?, ?, ?, ?, NULL)`,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+		appliedAt.Add(time.Second),
+		appliedAt.Add(time.Hour),
+	); err != nil {
+		t.Fatalf("insert descendant session: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO api_keys
+		 (id, tenant_id, user_id, name, prefix, hash, scopes, last_used_at, revoked_at, expires_at, created_at)
+		 VALUES ('surviving_users_key', ?, ?, 'surviving', 'pk_surviving', 'hash', 'users:write', NULL, NULL, NULL, ?)`,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		appliedAt.Add(time.Second),
+	); err != nil {
+		t.Fatalf("insert surviving users key: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close descendant fixture: %v", err)
 	}
 
-	second, err := BuildApp(ctx, cfg)
+	app, err := BuildApp(ctx, cfg)
 	if err != nil {
-		t.Fatalf("BuildApp() after fresh v3 state: %v", err)
+		t.Fatalf("BuildApp() with descendant credentials: %v", err)
 	}
-	defer second.Close()
-	if _, err := second.authMod.Service().ValidateSession(ctx, session.ID); err != nil {
-		t.Fatalf("post-v3 session was revoked: %v", err)
-	}
-	var activeKey int
-	if err := second.db.QueryRowContext(
+	defer app.Close()
+	if err := app.user.Service().VerifyPassword(
 		ctx,
-		`SELECT COUNT(*) FROM api_keys WHERE id = ? AND revoked_at IS NULL`,
-		key.ID,
-	).Scan(&activeKey); err != nil {
-		t.Fatalf("read post-v3 API key: %v", err)
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		"attacker-controlled-password",
+	); err == nil {
+		t.Fatal("password descended from the v3 API key still verifies")
 	}
-	if activeKey != 1 {
-		t.Fatalf("post-v3 active API key rows = %d, want 1", activeKey)
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		cfg.Seed.AdminPassword,
+	); err != nil {
+		t.Fatalf("configured owner password does not verify: %v", err)
+	}
+	for _, check := range []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "descendant session",
+			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'descendant_session' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "surviving users key",
+			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'surviving_users_key' AND revoked_at IS NOT NULL`,
+		},
+	} {
+		var revoked int
+		if err := app.db.QueryRowContext(ctx, check.query).Scan(&revoked); err != nil {
+			t.Fatalf("read %s: %v", check.name, err)
+		}
+		if revoked != 1 {
+			t.Fatalf("%s revoked rows = %d, want 1", check.name, revoked)
+		}
+	}
+}
+
+func TestBootstrapMigrationRunsCredentialCleanupAfterExistingV4(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	hasher, err := passhash.NewBcrypt(passhash.MinCost)
+	if err != nil {
+		t.Fatalf("create existing-v4 password hasher: %v", err)
+	}
+	currentHash, err := hasher.Hash(seed.UserPass)
+	if err != nil {
+		t.Fatalf("hash existing-v4 password: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open existing-v4 fixture: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`UPDATE users
+		 SET pass_hash = ?
+		 WHERE id = ? AND tenant_id = ?`,
+		currentHash,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+	); err != nil {
+		t.Fatalf("model existing-v4 password rotation: %v", err)
+	}
+	priorAppliedAt := time.Now().UTC().Add(-2 * time.Minute)
+	recordPriorBootstrapCleanup(
+		t,
+		db,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		priorAppliedAt,
+	)
+	v4AppliedAt := priorAppliedAt.Add(time.Minute)
+	recordBootstrapIdentityCleanup(t, db, v4AppliedAt)
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO auth_sessions
+		 (id, user_id, tenant_id, issued_at, expires_at, revoked_at)
+		 VALUES ('session_after_v4', ?, ?, ?, ?, NULL)`,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+		v4AppliedAt.Add(time.Second),
+		v4AppliedAt.Add(time.Hour),
+	); err != nil {
+		t.Fatalf("record session issued after v4: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO api_keys
+		 (id, tenant_id, user_id, name, prefix, hash, scopes, last_used_at, revoked_at, expires_at, created_at)
+		 VALUES ('key_after_v4', ?, ?, 'after-v4', 'pk_after_v4', 'hash', 'content:read', NULL, NULL, NULL, ?)`,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		v4AppliedAt.Add(time.Second),
+	); err != nil {
+		t.Fatalf("record API key issued after v4: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close existing-v4 fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() after existing v4: %v", err)
+	}
+	defer app.Close()
+	for _, check := range []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "post-v4 session",
+			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'session_after_v4' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "post-v4 API key",
+			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'key_after_v4' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "v5 marker",
+			query: `SELECT COUNT(*) FROM starterapp_migrations WHERE id = '` + bootstrapCredentialMigrationID + `'`,
+		},
+	} {
+		var count int
+		if err := app.db.QueryRowContext(ctx, check.query).Scan(&count); err != nil {
+			t.Fatalf("read existing-v4 %s: %v", check.name, err)
+		}
+		if count != 1 {
+			t.Fatalf("existing-v4 %s rows = %d, want 1", check.name, count)
+		}
 	}
 }
 
@@ -514,7 +796,506 @@ func TestBootstrapMigrationFinalizesPriorCleanupRotatesRetiredPassword(t *testin
 	}
 }
 
-func TestBootstrapMigrationPreservesCustomizedProductionIdentity(t *testing.T) {
+func TestBootstrapMigrationFinalizesReplacementOwnerCredentialOnDirectUpgrade(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	cfg.Environment = "production"
+	cfg.Seed.AdminEmail = "owner@customer.test"
+	cfg.Seed.AdminPassword = "configured-bootstrap-password"
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	hasher, err := passhash.NewBcrypt(passhash.MinCost)
+	if err != nil {
+		t.Fatalf("create direct-upgrade password hasher: %v", err)
+	}
+	const ownerPassword = "owner-private-password"
+	ownerHash, err := hasher.Hash(ownerPassword)
+	if err != nil {
+		t.Fatalf("hash direct-upgrade owner password: %v", err)
+	}
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open direct-upgrade fixture: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO users
+		 (id, tenant_id, email, username, pass_hash, display_name, active, created_at, updated_at)
+		 VALUES ('replacement_owner', ?, ?, 'owner', ?, 'Configured Owner', 1, ?, ?)`,
+		releasedBootstrapTenantID,
+		cfg.Seed.AdminEmail,
+		ownerHash,
+		now,
+		now,
+	); err != nil {
+		t.Fatalf("insert direct-upgrade replacement owner: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO auth_sessions
+		 (id, user_id, tenant_id, issued_at, expires_at, revoked_at)
+		 VALUES ('replacement_session_before_v5', 'replacement_owner', ?, ?, ?, NULL)`,
+		releasedBootstrapTenantID,
+		now,
+		now.Add(time.Hour),
+	); err != nil {
+		t.Fatalf("insert direct-upgrade replacement session: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO api_keys
+		 (id, tenant_id, user_id, name, prefix, hash, scopes, last_used_at, revoked_at, expires_at, created_at)
+		 VALUES ('replacement_key_before_v5', ?, 'replacement_owner', 'replacement', 'pk_replacement', 'hash', 'users:write', NULL, NULL, NULL, ?)`,
+		releasedBootstrapTenantID,
+		now,
+	); err != nil {
+		t.Fatalf("insert direct-upgrade replacement API key: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close direct-upgrade fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() direct replacement-owner upgrade: %v", err)
+	}
+	defer app.Close()
+	if app.adminSubject != "replacement_owner" {
+		t.Fatalf("adminSubject = %q, want replacement_owner", app.adminSubject)
+	}
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		releasedBootstrapTenantID,
+		"replacement_owner",
+		ownerPassword,
+	); err == nil {
+		t.Fatal("direct-upgrade replacement-owner credential survived v5 finalization")
+	}
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		releasedBootstrapTenantID,
+		"replacement_owner",
+		cfg.Seed.AdminPassword,
+	); err != nil {
+		t.Fatalf("configured replacement-owner password does not verify: %v", err)
+	}
+	if _, err := app.authMod.Service().Login(ctx, releasedBootstrapTenantID, auth.Credentials{
+		Email:    releasedBootstrapUserEmail,
+		Password: releasedBootstrapUserPassword,
+	}); err == nil {
+		t.Fatal("direct upgrade left the superseded released account on the public password")
+	}
+	supersededUser, err := app.user.Service().Get(
+		ctx,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+	)
+	if err != nil {
+		t.Fatalf("read direct-upgrade superseded account: %v", err)
+	}
+	if supersededUser.Active || supersededUser.PassHash != "" {
+		t.Fatalf(
+			"direct-upgrade superseded account active=%v pass_hash_present=%v, want disabled without a password",
+			supersededUser.Active,
+			supersededUser.PassHash != "",
+		)
+	}
+	for _, check := range []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "session",
+			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'session_existing' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "API key",
+			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'key_existing' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "replacement session",
+			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'replacement_session_before_v5' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "replacement API key",
+			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'replacement_key_before_v5' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "v5 marker",
+			query: `SELECT COUNT(*) FROM starterapp_migrations WHERE id = '` + bootstrapCredentialMigrationID + `'`,
+		},
+	} {
+		var count int
+		if err := app.db.QueryRowContext(ctx, check.query).Scan(&count); err != nil {
+			t.Fatalf("read direct-upgrade %s: %v", check.name, err)
+		}
+		if count != 1 {
+			t.Fatalf("direct-upgrade %s rows = %d, want 1", check.name, count)
+		}
+	}
+}
+
+func TestBootstrapMigrationDisablesSupersededPublicCredentialAfterExistingV4(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	cfg.Environment = "production"
+	cfg.Seed.AdminEmail = "owner@customer.test"
+	cfg.Seed.AdminPassword = "configured-bootstrap-password"
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	hasher, err := passhash.NewBcrypt(passhash.MinCost)
+	if err != nil {
+		t.Fatalf("create replacement-owner password hasher: %v", err)
+	}
+	const ownerPassword = "owner-private-password"
+	ownerHash, err := hasher.Hash(ownerPassword)
+	if err != nil {
+		t.Fatalf("hash replacement-owner password: %v", err)
+	}
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open superseded-public fixture: %v", err)
+	}
+	v4AppliedAt := time.Now().UTC()
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO users
+		 (id, tenant_id, email, username, pass_hash, display_name, active, created_at, updated_at)
+		 VALUES ('replacement_owner', ?, ?, 'owner', ?, 'Configured Owner', 1, ?, ?)`,
+		releasedBootstrapTenantID,
+		cfg.Seed.AdminEmail,
+		ownerHash,
+		v4AppliedAt,
+		v4AppliedAt,
+	); err != nil {
+		t.Fatalf("insert replacement owner: %v", err)
+	}
+	recordBootstrapIdentityLedger(
+		t,
+		db,
+		releasedBootstrapTenantID,
+		"replacement_owner",
+	)
+	recordBootstrapIdentityCleanup(t, db, v4AppliedAt)
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO auth_sessions
+		 (id, user_id, tenant_id, issued_at, expires_at, revoked_at)
+		 VALUES ('superseded_session_after_v4', ?, ?, ?, ?, NULL)`,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+		v4AppliedAt.Add(time.Second),
+		v4AppliedAt.Add(time.Hour),
+	); err != nil {
+		t.Fatalf("record superseded post-v4 session: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO api_keys
+		 (id, tenant_id, user_id, name, prefix, hash, scopes, last_used_at, revoked_at, expires_at, created_at)
+		 VALUES ('superseded_key_after_v4', ?, ?, 'after-v4', 'pk_superseded', 'hash', 'content:read', NULL, NULL, NULL, ?)`,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		v4AppliedAt.Add(time.Second),
+	); err != nil {
+		t.Fatalf("record superseded post-v4 API key: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close superseded-public fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() with superseded public credential: %v", err)
+	}
+	defer app.Close()
+	if app.adminSubject != "replacement_owner" {
+		t.Fatalf("adminSubject = %q, want replacement_owner", app.adminSubject)
+	}
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		releasedBootstrapTenantID,
+		"replacement_owner",
+		ownerPassword,
+	); err == nil {
+		t.Fatal("pre-v5 replacement-owner password still verifies")
+	}
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		releasedBootstrapTenantID,
+		"replacement_owner",
+		cfg.Seed.AdminPassword,
+	); err != nil {
+		t.Fatalf("configured replacement-owner password does not verify: %v", err)
+	}
+	if _, err := app.authMod.Service().Login(ctx, releasedBootstrapTenantID, auth.Credentials{
+		Email:    releasedBootstrapUserEmail,
+		Password: releasedBootstrapUserPassword,
+	}); err == nil {
+		t.Fatal("superseded released account still accepts the retired public password")
+	}
+	supersededUser, err := app.user.Service().Get(
+		ctx,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+	)
+	if err != nil {
+		t.Fatalf("read superseded released account: %v", err)
+	}
+	if supersededUser.Active || supersededUser.PassHash != "" {
+		t.Fatalf(
+			"superseded released account active=%v pass_hash_present=%v, want disabled without a password",
+			supersededUser.Active,
+			supersededUser.PassHash != "",
+		)
+	}
+	for _, check := range []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "pre-v4 session",
+			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'session_existing' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "post-v4 session",
+			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'superseded_session_after_v4' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "pre-v4 API key",
+			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'key_existing' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "post-v4 API key",
+			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'superseded_key_after_v4' AND revoked_at IS NOT NULL`,
+		},
+	} {
+		var revoked int
+		if err := app.db.QueryRowContext(ctx, check.query).Scan(&revoked); err != nil {
+			t.Fatalf("read superseded %s: %v", check.name, err)
+		}
+		if revoked != 1 {
+			t.Fatalf("superseded %s revoked rows = %d, want 1", check.name, revoked)
+		}
+	}
+}
+
+func TestBootstrapMigrationFinalizesPriorCleanupRevokesOrphanedReleasedCredentials(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open orphaned-credential fixture: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`DELETE FROM users WHERE id = ? AND tenant_id = ?`,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+	); err != nil {
+		t.Fatalf("delete released account: %v", err)
+	}
+	priorAppliedAt := time.Now().UTC()
+	recordPriorBootstrapCleanup(
+		t,
+		db,
+		releasedBootstrapTenantID,
+		seed.UserID,
+		priorAppliedAt,
+	)
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO auth_sessions
+		 (id, user_id, tenant_id, issued_at, expires_at, revoked_at)
+		 VALUES ('orphaned_session_after_v3', ?, ?, ?, ?, NULL)`,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+		priorAppliedAt.Add(time.Second),
+		priorAppliedAt.Add(time.Hour),
+	); err != nil {
+		t.Fatalf("record orphaned post-v3 session: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO api_keys
+		 (id, tenant_id, user_id, name, prefix, hash, scopes, last_used_at, revoked_at, expires_at, created_at)
+		 VALUES ('orphaned_key_after_v3', ?, ?, 'after-v3', 'pk_orphaned', 'hash', 'content:read', NULL, NULL, NULL, ?)`,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		priorAppliedAt.Add(time.Second),
+	); err != nil {
+		t.Fatalf("record orphaned post-v3 API key: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close orphaned-credential fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() with orphaned released credentials: %v", err)
+	}
+	defer app.Close()
+	for _, check := range []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "post-v3 session",
+			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'orphaned_session_after_v3' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "post-v3 API key",
+			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'orphaned_key_after_v3' AND revoked_at IS NOT NULL`,
+		},
+	} {
+		var revoked int
+		if err := app.db.QueryRowContext(ctx, check.query).Scan(&revoked); err != nil {
+			t.Fatalf("read orphaned %s: %v", check.name, err)
+		}
+		if revoked != 1 {
+			t.Fatalf("orphaned %s revoked rows = %d, want 1", check.name, revoked)
+		}
+	}
+}
+
+func TestBootstrapMigrationFinalizesPriorCleanupRetiresSupersededCustomizedUser(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	cfg.Environment = "production"
+	cfg.Seed.AdminEmail = "owner@customer.test"
+	cfg.Seed.AdminPassword = "configured-bootstrap-password"
+	createLegacyBootstrapFixture(t, cfg.Database.DSN)
+
+	hasher, err := passhash.NewBcrypt(passhash.MinCost)
+	if err != nil {
+		t.Fatalf("create customized-superseded password hasher: %v", err)
+	}
+	const (
+		ownerPassword    = "owner-private-password"
+		ordinaryPassword = "ordinary-private-password"
+	)
+	ownerHash, err := hasher.Hash(ownerPassword)
+	if err != nil {
+		t.Fatalf("hash replacement-owner password: %v", err)
+	}
+	ordinaryHash, err := hasher.Hash(ordinaryPassword)
+	if err != nil {
+		t.Fatalf("hash customized superseded password: %v", err)
+	}
+	db, err := sql.Open("sqlite", cfg.Database.DSN)
+	if err != nil {
+		t.Fatalf("open customized-superseded fixture: %v", err)
+	}
+	priorAppliedAt := time.Now().UTC()
+	if _, err := db.ExecContext(
+		ctx,
+		`UPDATE users
+		 SET pass_hash = ?, display_name = 'Ordinary User'
+		 WHERE id = ? AND tenant_id = ?`,
+		ordinaryHash,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+	); err != nil {
+		t.Fatalf("customize superseded released account: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO users
+		 (id, tenant_id, email, username, pass_hash, display_name, active, created_at, updated_at)
+		 VALUES ('replacement_owner', ?, ?, 'owner', ?, 'Configured Owner', 1, ?, ?)`,
+		releasedBootstrapTenantID,
+		cfg.Seed.AdminEmail,
+		ownerHash,
+		priorAppliedAt,
+		priorAppliedAt,
+	); err != nil {
+		t.Fatalf("insert replacement owner: %v", err)
+	}
+	recordPriorBootstrapCleanup(
+		t,
+		db,
+		releasedBootstrapTenantID,
+		"replacement_owner",
+		priorAppliedAt,
+	)
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO auth_sessions
+		 (id, user_id, tenant_id, issued_at, expires_at, revoked_at)
+		 VALUES ('customized_session_after_v3', ?, ?, ?, ?, NULL)`,
+		releasedBootstrapUserID,
+		releasedBootstrapTenantID,
+		priorAppliedAt.Add(time.Second),
+		priorAppliedAt.Add(time.Hour),
+	); err != nil {
+		t.Fatalf("record customized post-v3 session: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO api_keys
+		 (id, tenant_id, user_id, name, prefix, hash, scopes, last_used_at, revoked_at, expires_at, created_at)
+		 VALUES ('customized_key_after_v3', ?, ?, 'after-v3', 'pk_customized', 'hash', 'content:read', NULL, NULL, NULL, ?)`,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		priorAppliedAt.Add(time.Second),
+	); err != nil {
+		t.Fatalf("record customized post-v3 API key: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close customized-superseded fixture: %v", err)
+	}
+
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp() with customized superseded user: %v", err)
+	}
+	defer app.Close()
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+		ordinaryPassword,
+	); err == nil {
+		t.Fatal("customized superseded password still verifies")
+	}
+	customizedUser, err := app.user.Service().Get(
+		ctx,
+		releasedBootstrapTenantID,
+		releasedBootstrapUserID,
+	)
+	if err != nil {
+		t.Fatalf("read customized superseded user: %v", err)
+	}
+	if customizedUser.Active {
+		t.Fatal("customized superseded user remained active")
+	}
+	for _, check := range []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "post-v3 session",
+			query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'customized_session_after_v3' AND revoked_at IS NOT NULL`,
+		},
+		{
+			name:  "post-v3 API key",
+			query: `SELECT COUNT(*) FROM api_keys WHERE id = 'customized_key_after_v3' AND revoked_at IS NOT NULL`,
+		},
+	} {
+		var matching int
+		if err := app.db.QueryRowContext(ctx, check.query).Scan(&matching); err != nil {
+			t.Fatalf("read customized %s: %v", check.name, err)
+		}
+		if matching != 1 {
+			t.Fatalf("customized %s matching rows = %d, want 1", check.name, matching)
+		}
+	}
+}
+
+func TestBootstrapMigrationPreservesCustomizedProductionLabelsAndRekeysReleasedIdentity(t *testing.T) {
 	ctx := context.Background()
 	cfg := freshConfig(t)
 	createLegacyBootstrapFixture(t, cfg.Database.DSN)
@@ -603,16 +1384,16 @@ func TestBootstrapMigrationPreservesCustomizedProductionIdentity(t *testing.T) {
 		releasedBootstrapTenantID,
 		releasedBootstrapUserID,
 		customPassword,
-	); err != nil {
-		t.Fatalf("customized password was not preserved: %v", err)
+	); err == nil {
+		t.Fatal("password descended from the released login still verifies")
 	}
 	if err := app.user.Service().VerifyPassword(
 		ctx,
 		releasedBootstrapTenantID,
 		releasedBootstrapUserID,
 		cfg.Seed.AdminPassword,
-	); err == nil {
-		t.Fatal("production migration replaced the operator-rotated password")
+	); err != nil {
+		t.Fatalf("configured replacement password does not verify: %v", err)
 	}
 
 	var historicalSessionRevokedAt sql.NullTime
@@ -622,8 +1403,8 @@ func TestBootstrapMigrationPreservesCustomizedProductionIdentity(t *testing.T) {
 	).Scan(&historicalSessionRevokedAt); err != nil {
 		t.Fatalf("read customized historical session: %v", err)
 	}
-	if historicalSessionRevokedAt.Valid {
-		t.Fatal("migration revoked a session after the bootstrap password had been rotated")
+	if !historicalSessionRevokedAt.Valid {
+		t.Fatal("migration preserved a session descended from the released login")
 	}
 	var historicalAPIKeyRevokedAt sql.NullTime
 	if err := app.db.QueryRowContext(
@@ -632,8 +1413,8 @@ func TestBootstrapMigrationPreservesCustomizedProductionIdentity(t *testing.T) {
 	).Scan(&historicalAPIKeyRevokedAt); err != nil {
 		t.Fatalf("read customized historical API key: %v", err)
 	}
-	if historicalAPIKeyRevokedAt.Valid {
-		t.Fatal("migration revoked an API key after the bootstrap password had been rotated")
+	if !historicalAPIKeyRevokedAt.Valid {
+		t.Fatal("migration preserved an API key descended from the released login")
 	}
 
 	assertDurableBootstrapReferencesPreserved(t, app.db, 1)
@@ -884,7 +1665,7 @@ func TestBootstrapMigrationRejectsReusedReleasedAdministratorID(t *testing.T) {
 	}
 }
 
-func TestBootstrapMigrationPreservesExplicitlyConfiguredAdministrator(t *testing.T) {
+func TestBootstrapMigrationSelectsAndFinalizesExplicitlyConfiguredAdministrator(t *testing.T) {
 	for _, tenantMissing := range []bool{false, true} {
 		name := "tenant-present"
 		if tenantMissing {
@@ -969,16 +1750,24 @@ func TestBootstrapMigrationPreservesExplicitlyConfiguredAdministrator(t *testing
 				releasedBootstrapTenantID,
 				"replacement_owner",
 				ownerPassword,
+			); err == nil {
+				t.Fatal("pre-v5 configured-owner password remained usable")
+			}
+			if err := app.user.Service().VerifyPassword(
+				ctx,
+				releasedBootstrapTenantID,
+				"replacement_owner",
+				cfg.Seed.AdminPassword,
 			); err != nil {
-				t.Fatalf("configured owner's password changed: %v", err)
+				t.Fatalf("configured bootstrap password does not verify for selected owner: %v", err)
 			}
 			if err := app.user.Service().VerifyPassword(
 				ctx,
 				releasedBootstrapTenantID,
 				releasedBootstrapUserID,
 				ordinaryPassword,
-			); err != nil {
-				t.Fatalf("ordinary released-ID owner's password changed: %v", err)
+			); err == nil {
+				t.Fatal("superseded released-ID password still verifies")
 			}
 			if err := app.user.Service().VerifyPassword(
 				ctx,
@@ -987,6 +1776,21 @@ func TestBootstrapMigrationPreservesExplicitlyConfiguredAdministrator(t *testing
 				cfg.Seed.AdminPassword,
 			); err == nil {
 				t.Fatal("ordinary released-ID owner received the bootstrap password")
+			}
+			retiredUser, err := app.user.Service().Get(
+				ctx,
+				releasedBootstrapTenantID,
+				releasedBootstrapUserID,
+			)
+			if err != nil {
+				t.Fatalf("read retired released-ID account: %v", err)
+			}
+			if retiredUser.Active || retiredUser.PassHash != "" {
+				t.Fatalf(
+					"retired released-ID account active=%v pass_hash_present=%v",
+					retiredUser.Active,
+					retiredUser.PassHash != "",
+				)
 			}
 		})
 	}
@@ -1877,6 +2681,18 @@ func recordPriorBootstrapCleanup(
 	appliedAt time.Time,
 ) {
 	t.Helper()
+	recordBootstrapIdentityLedger(t, db, tenantID, userID)
+	if _, err := db.Exec(
+		`INSERT INTO starterapp_migrations (id, applied_at) VALUES (?, ?)`,
+		priorBootstrapIdentityMigrationID,
+		appliedAt,
+	); err != nil {
+		t.Fatalf("record prior cleanup revision: %v", err)
+	}
+}
+
+func recordBootstrapIdentityLedger(t *testing.T, db *sql.DB, tenantID, userID string) {
+	t.Helper()
 	if _, err := db.Exec(`
 		CREATE TABLE starterapp_migrations (
 			id TEXT PRIMARY KEY,
@@ -1890,19 +2706,23 @@ func recordPriorBootstrapCleanup(
 		t.Fatalf("create prior cleanup ledger: %v", err)
 	}
 	if _, err := db.Exec(
-		`INSERT INTO starterapp_migrations (id, applied_at) VALUES (?, ?)`,
-		priorBootstrapIdentityMigrationID,
-		appliedAt,
-	); err != nil {
-		t.Fatalf("record prior cleanup revision: %v", err)
-	}
-	if _, err := db.Exec(
 		`INSERT INTO starterapp_bootstrap_identity (id, tenant_id, user_id)
 		 VALUES ('active', ?, ?)`,
 		tenantID,
 		userID,
 	); err != nil {
 		t.Fatalf("record prior cleanup identity: %v", err)
+	}
+}
+
+func recordBootstrapIdentityCleanup(t *testing.T, db *sql.DB, appliedAt time.Time) {
+	t.Helper()
+	if _, err := db.Exec(
+		`INSERT INTO starterapp_migrations (id, applied_at) VALUES (?, ?)`,
+		bootstrapIdentityMigrationID,
+		appliedAt,
+	); err != nil {
+		t.Fatalf("record bootstrap identity cleanup revision: %v", err)
 	}
 }
 
