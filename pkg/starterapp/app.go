@@ -517,6 +517,10 @@ func (a *App) Mux() (http.Handler, error) {
 	// Machine-readable operation discovery for contributed modules.
 	mux.HandleFunc("/openapi/extensions.json", a.extensionOpenAPIHandler)
 
+	// A real favicon keeps browser smoke checks and developer consoles clean.
+	// The exact route wins over the catch-all landing-page handler below.
+	mux.HandleFunc("/favicon.ico", faviconHandler)
+
 	// Root product landing page — useful for browser and curl smoke checks.
 	mux.HandleFunc("/", a.indexHandler)
 

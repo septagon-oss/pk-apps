@@ -238,6 +238,25 @@ func TestRoutesAreRegistered(t *testing.T) {
 	if !strings.Contains(body, "One process. Real product surface.") {
 		t.Error("root index is missing the product landing-page headline")
 	}
+
+	favicon, err := http.Get(srv.URL + "/favicon.ico")
+	if err != nil {
+		t.Fatalf("GET /favicon.ico: %v", err)
+	}
+	defer favicon.Body.Close()
+	if favicon.StatusCode != http.StatusOK {
+		t.Errorf("GET /favicon.ico: status = %d, want 200", favicon.StatusCode)
+	}
+	if got := favicon.Header.Get("Content-Type"); got != "image/svg+xml" {
+		t.Errorf("GET /favicon.ico: Content-Type = %q, want image/svg+xml", got)
+	}
+	faviconBody, err := io.ReadAll(favicon.Body)
+	if err != nil {
+		t.Fatalf("read favicon body: %v", err)
+	}
+	if !strings.Contains(string(faviconBody), "<svg") {
+		t.Error("GET /favicon.ico did not return an SVG icon")
+	}
 }
 
 func TestDefaultConfigBindsToLoopback(t *testing.T) {
@@ -250,7 +269,7 @@ func TestDefaultConfigBindsToLoopback(t *testing.T) {
 func TestDisplayURLProducesNavigableLocalAddresses(t *testing.T) {
 	t.Parallel()
 	tests := map[string]string{
-		":8080":           "http://127.0.0.1:8080",
+		":8080":          "http://127.0.0.1:8080",
 		"127.0.0.1:8080": "http://127.0.0.1:8080",
 		"0.0.0.0:8080":   "http://127.0.0.1:8080",
 		"[::]:8080":      "http://127.0.0.1:8080",

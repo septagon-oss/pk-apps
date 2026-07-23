@@ -19,6 +19,8 @@ type landingView struct {
 	Modules       []string
 }
 
+const faviconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="8" fill="#12201d"/><rect x="13" y="13" width="16" height="16" fill="#d8f35d"/><rect x="35" y="13" width="16" height="16" fill="none" stroke="#eff4e9" stroke-width="3"/><rect x="13" y="40" width="38" height="10" fill="#d8f35d"/></svg>`
+
 var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype html>
 <html lang="en">
 <head>
@@ -166,6 +168,21 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
   <footer><span>{{.AppName}}</span><span>PlatformKit OSS · built to be extended</span></footer>
 </body>
 </html>`))
+
+func faviconHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write([]byte(faviconSVG))
+}
 
 func (a *App) indexHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
