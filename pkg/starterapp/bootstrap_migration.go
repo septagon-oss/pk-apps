@@ -19,9 +19,10 @@ import (
 // generic local identity was introduced. They are migration input only: new
 // databases and current runtime behavior use the constants in package seed.
 const (
-	bootstrapCredentialMigrationID    = "20260723_bootstrap_credentials_v5"
-	bootstrapIdentityMigrationID      = "20260723_bootstrap_labels_v4"
-	priorBootstrapIdentityMigrationID = "20260723_bootstrap_labels_v3"
+	bootstrapCredentialRemediationMigrationID = "20260724_bootstrap_credentials_v6"
+	bootstrapCredentialMigrationID            = "20260723_bootstrap_credentials_v5"
+	bootstrapIdentityMigrationID              = "20260723_bootstrap_labels_v4"
+	priorBootstrapIdentityMigrationID         = "20260723_bootstrap_labels_v3"
 
 	legacyBootstrapTenantID     = "tenant_acme"
 	legacyBootstrapTenantSlug   = "acme"
@@ -655,34 +656,43 @@ func migrateBootstrapIdentity(
 		)
 	}
 	finalizeMarkedCredentialCleanup := func() error {
-		// A complete neutral identity carrying v3 or v4 was created after the
-		// retired public bootstrap identity had already been removed from the
-		// fresh-install path. Its credentials therefore have no released-login
-		// lineage and must survive this one-time migration.
-		if identity == neutralIdentity {
-			if !identityIncomplete {
-				return nil
-			}
-			if selectedUserCount == 0 {
-				return resetSelectedCredential()
-			}
-			// A missing tenant invalidates the current authorization context,
-			// so retire its live tokens before seed repairs the row. The
-			// surviving user still proves password continuity, however; never
-			// re-assert the first-boot password merely to recreate the tenant.
-			return revokeCredentials(identity.TenantID, identity.UserID)
-		}
-		// Legacy-derived identities are different. Early builds carrying v3
-		// normalized their labels and rotated the public password, but did not
-		// revoke API keys. A surviving users:write key could replace the
-		// password and mint a session after either marker, so neither timestamps
-		// nor a non-public hash prove descendant credentials safe. Re-key the
-		// selected owner and revoke the family. Do not replay label comparisons:
-		// historical-looking labels may now be deliberate operator values.
+		// Every build that could record v3 or v4 allowed a users:write API key
+		// to replace an interactive password. That includes already-neutral
+		// identities: a non-public hash or a post-marker session does not prove
+		// who selected it. Re-key the selected owner and revoke its credential
+		// family once before certifying v5. Durable IDs, visible labels, and
+		// tenant-owned data remain untouched.
 		if err := resetSelectedCredential(); err != nil {
 			return err
 		}
+		// Once a prior cleanup selected the neutral identity, the retired IDs
+		// are no longer authoritative evidence. A downstream operator may have
+		// legitimately reused them for an unrelated tenant and user, so only
+		// retire the released pair when the durable identity is legacy-derived.
+		if identity == neutralIdentity {
+			return nil
+		}
 		return retireSupersededReleasedCredential()
+	}
+
+	var credentialRemediationApplied int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM starterapp_migrations WHERE id = ?`,
+		bootstrapCredentialRemediationMigrationID,
+	).Scan(&credentialRemediationApplied); err != nil {
+		return fmt.Errorf("starterapp: inspect credential remediation migration: %w", err)
+	}
+	if credentialRemediationApplied != 0 {
+		if identityIncomplete {
+			if err := revokeCredentials(identity.TenantID, identity.UserID); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("starterapp: finish applied bootstrap credential remediation: %w", err)
+		}
+		return nil
 	}
 
 	var credentialCleanupApplied int
@@ -694,13 +704,19 @@ func migrateBootstrapIdentity(
 		return fmt.Errorf("starterapp: inspect credential cleanup migration: %w", err)
 	}
 	if credentialCleanupApplied != 0 {
-		if identityIncomplete {
-			if err := revokeCredentials(identity.TenantID, identity.UserID); err != nil {
-				return err
-			}
+		if err := finalizeMarkedCredentialCleanup(); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO starterapp_migrations (id, applied_at) VALUES (?, ?)`,
+			bootstrapCredentialRemediationMigrationID,
+			now,
+		); err != nil {
+			return fmt.Errorf("starterapp: record bootstrap credential remediation: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("starterapp: finish applied bootstrap credential migration: %w", err)
+			return fmt.Errorf("starterapp: finalize bootstrap credential remediation: %w", err)
 		}
 		return nil
 	}
@@ -734,6 +750,14 @@ func migrateBootstrapIdentity(
 		); err != nil {
 			return fmt.Errorf("starterapp: record bootstrap credential migration: %w", err)
 		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO starterapp_migrations (id, applied_at) VALUES (?, ?)`,
+			bootstrapCredentialRemediationMigrationID,
+			now,
+		); err != nil {
+			return fmt.Errorf("starterapp: record bootstrap credential remediation: %w", err)
+		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("starterapp: finalize bootstrap credential migration: %w", err)
 		}
@@ -759,6 +783,14 @@ func migrateBootstrapIdentity(
 			now,
 		); err != nil {
 			return fmt.Errorf("starterapp: record finalized bootstrap credential migration: %w", err)
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO starterapp_migrations (id, applied_at) VALUES (?, ?)`,
+			bootstrapCredentialRemediationMigrationID,
+			now,
+		); err != nil {
+			return fmt.Errorf("starterapp: record finalized bootstrap credential remediation: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("starterapp: finalize prior bootstrap identity migration: %w", err)
@@ -955,7 +987,7 @@ func migrateBootstrapIdentity(
 	// created a replacement owner, changed its password, and minted credentials
 	// before this resolver promoted it to adminSubject. Re-key every existing
 	// selected owner and revoke its entire credential family before certifying
-	// v5. For an incomplete identity this still revokes any orphaned credentials;
+	// v6. For an incomplete identity this still revokes any orphaned credentials;
 	// seed.Run creates the missing row after this transaction.
 	if err := resetSelectedCredential(); err != nil {
 		return err
@@ -982,6 +1014,14 @@ func migrateBootstrapIdentity(
 		now,
 	); err != nil {
 		return fmt.Errorf("starterapp: record bootstrap credential migration: %w", err)
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO starterapp_migrations (id, applied_at) VALUES (?, ?)`,
+		bootstrapCredentialRemediationMigrationID,
+		now,
+	); err != nil {
+		return fmt.Errorf("starterapp: record bootstrap credential remediation: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("starterapp: commit bootstrap identity migration: %w", err)

@@ -386,7 +386,7 @@ func TestBootstrapMigrationFinalizesPriorCleanupWithoutReplayingLabels(t *testin
 	}
 }
 
-func TestBootstrapMigrationPreservesCleanNeutralPasswordAcrossV5(t *testing.T) {
+func TestBootstrapMigrationRekeysNeutralCredentialsAcrossV5(t *testing.T) {
 	for _, migration := range []struct {
 		name          string
 		id            string
@@ -410,34 +410,91 @@ func TestBootstrapMigrationPreservesCleanNeutralPasswordAcrossV5(t *testing.T) {
 				ctx,
 				seed.TenantID,
 				seed.UserID,
-				"operator-rotated-password",
+				"pre-v5-selected-password",
 			); err != nil {
-				t.Fatalf("rotate neutral administrator password: %v", err)
+				t.Fatalf("model pre-v5 password replacement: %v", err)
 			}
 			session, err := first.authMod.Service().Login(ctx, seed.TenantID, auth.Credentials{
 				Email:    seed.UserEmail,
-				Password: "operator-rotated-password",
+				Password: "pre-v5-selected-password",
 			})
 			if err != nil {
-				t.Fatalf("create neutral administrator session: %v", err)
+				t.Fatalf("create pre-v5 administrator session: %v", err)
 			}
 			plaintext, key, err := first.apiKey.Service().Issue(
 				ctx,
 				seed.TenantID,
 				seed.UserID,
-				"operator-integration",
-				[]string{"content:read"},
+				"pre-v5-automation",
+				[]string{"users:write"},
 				0,
 			)
 			if err != nil {
-				t.Fatalf("create neutral administrator API key: %v", err)
+				t.Fatalf("create pre-v5 users API key: %v", err)
+			}
+			var unrelatedPassHash string
+			if err := first.db.QueryRowContext(
+				ctx,
+				`SELECT pass_hash FROM users WHERE id = ? AND tenant_id = ?`,
+				seed.UserID,
+				seed.TenantID,
+			).Scan(&unrelatedPassHash); err != nil {
+				t.Fatalf("read password hash for unrelated-ID fixture: %v", err)
+			}
+			now := time.Now().UTC()
+			if _, err := first.db.ExecContext(
+				ctx,
+				`INSERT INTO tenants
+				 (id, slug, name, created_at, updated_at)
+				 VALUES (?, 'customer-acme', 'Customer Acme', ?, ?)`,
+				releasedBootstrapTenantID,
+				now,
+				now,
+			); err != nil {
+				t.Fatalf("insert unrelated reused-ID tenant: %v", err)
+			}
+			if _, err := first.db.ExecContext(
+				ctx,
+				`INSERT INTO users
+				 (id, tenant_id, email, username, pass_hash, display_name, active, created_at, updated_at)
+				 VALUES (?, ?, 'customer@example.test', 'customer-admin', ?, 'Customer Admin', 1, ?, ?)`,
+				releasedBootstrapUserID,
+				releasedBootstrapTenantID,
+				unrelatedPassHash,
+				now,
+				now,
+			); err != nil {
+				t.Fatalf("insert unrelated reused-ID user: %v", err)
+			}
+			if _, err := first.db.ExecContext(
+				ctx,
+				`INSERT INTO auth_sessions
+				 (id, user_id, tenant_id, issued_at, expires_at, revoked_at)
+				 VALUES ('unrelated_reused_id_session', ?, ?, ?, ?, NULL)`,
+				releasedBootstrapUserID,
+				releasedBootstrapTenantID,
+				now,
+				now.Add(time.Hour),
+			); err != nil {
+				t.Fatalf("insert unrelated reused-ID session: %v", err)
+			}
+			if _, err := first.db.ExecContext(
+				ctx,
+				`INSERT INTO api_keys
+				 (id, tenant_id, user_id, name, prefix, hash, scopes, last_used_at, revoked_at, expires_at, created_at)
+				 VALUES ('unrelated_reused_id_key', ?, ?, 'unrelated', 'pk_unrelated', 'hash', '["content:read"]', NULL, NULL, NULL, ?)`,
+				releasedBootstrapTenantID,
+				releasedBootstrapUserID,
+				now,
+			); err != nil {
+				t.Fatalf("insert unrelated reused-ID API key: %v", err)
 			}
 			if _, err := first.db.ExecContext(
 				ctx,
 				`DELETE FROM starterapp_migrations WHERE id = ?`,
-				bootstrapCredentialMigrationID,
+				bootstrapCredentialRemediationMigrationID,
 			); err != nil {
-				t.Fatalf("remove v5 marker: %v", err)
+				t.Fatalf("remove v6 marker while retaining v5: %v", err)
 			}
 			if migration.id == priorBootstrapIdentityMigrationID {
 				if _, err := first.db.ExecContext(
@@ -474,49 +531,175 @@ func TestBootstrapMigrationPreservesCleanNeutralPasswordAcrossV5(t *testing.T) {
 				ctx,
 				seed.TenantID,
 				seed.UserID,
-				"operator-rotated-password",
-			); err != nil {
-				t.Fatalf("operator-rotated password changed: %v", err)
+				"pre-v5-selected-password",
+			); err == nil {
+				t.Fatal("pre-v5 selected password still verifies")
 			}
 			if err := second.user.Service().VerifyPassword(
 				ctx,
 				seed.TenantID,
 				seed.UserID,
 				cfg.Seed.AdminPassword,
-			); err == nil {
-				t.Fatal("stale first-boot password was re-asserted")
+			); err != nil {
+				t.Fatalf("configured replacement password does not verify: %v", err)
 			}
-			if migration.missingTenant {
-				if _, err := second.authMod.Service().ValidateSession(ctx, session.ID); err == nil {
-					t.Fatal("session survived a missing tenant authorization boundary")
-				}
-				if _, err := second.apiKey.Service().Verify(ctx, plaintext); err == nil {
-					t.Fatal("API key survived a missing tenant authorization boundary")
-				}
-			} else {
-				if _, err := second.authMod.Service().ValidateSession(ctx, session.ID); err != nil {
-					t.Fatalf("legitimate session was revoked: %v", err)
-				}
-				verifiedKey, err := second.apiKey.Service().Verify(ctx, plaintext)
-				if err != nil {
-					t.Fatalf("legitimate API key was revoked: %v", err)
-				}
-				if verifiedKey.ID != key.ID {
-					t.Fatalf("verified API key ID = %q, want %q", verifiedKey.ID, key.ID)
-				}
+			if _, err := second.authMod.Service().ValidateSession(ctx, session.ID); err == nil {
+				t.Fatal("pre-v5 session survived credential cleanup")
 			}
-			var v5Count int
+			if _, err := second.apiKey.Service().Verify(ctx, plaintext); err == nil {
+				t.Fatal("pre-v5 API key survived credential cleanup")
+			}
+			var revokedKeyCount int
 			if err := second.db.QueryRowContext(
 				ctx,
-				`SELECT COUNT(*) FROM starterapp_migrations WHERE id = ?`,
-				bootstrapCredentialMigrationID,
-			).Scan(&v5Count); err != nil {
-				t.Fatalf("read v5 marker: %v", err)
+				`SELECT COUNT(*) FROM api_keys WHERE id = ? AND revoked_at IS NOT NULL`,
+				key.ID,
+			).Scan(&revokedKeyCount); err != nil {
+				t.Fatalf("read revoked pre-v5 API key: %v", err)
 			}
-			if v5Count != 1 {
-				t.Fatalf("v5 marker rows = %d, want 1", v5Count)
+			if revokedKeyCount != 1 {
+				t.Fatalf("revoked pre-v5 API key rows = %d, want 1", revokedKeyCount)
+			}
+			var unrelatedActive, unrelatedHashPresent int
+			if err := second.db.QueryRowContext(
+				ctx,
+				`SELECT active, pass_hash <> ''
+				 FROM users
+				 WHERE id = ? AND tenant_id = ?`,
+				releasedBootstrapUserID,
+				releasedBootstrapTenantID,
+			).Scan(&unrelatedActive, &unrelatedHashPresent); err != nil {
+				t.Fatalf("read unrelated reused-ID user: %v", err)
+			}
+			if unrelatedActive != 1 || unrelatedHashPresent != 1 {
+				t.Fatalf(
+					"unrelated reused-ID user active=%d hash_present=%d, want 1/1",
+					unrelatedActive,
+					unrelatedHashPresent,
+				)
+			}
+			for _, check := range []struct {
+				name  string
+				query string
+			}{
+				{
+					name:  "session",
+					query: `SELECT COUNT(*) FROM auth_sessions WHERE id = 'unrelated_reused_id_session' AND revoked_at IS NULL`,
+				},
+				{
+					name:  "API key",
+					query: `SELECT COUNT(*) FROM api_keys WHERE id = 'unrelated_reused_id_key' AND revoked_at IS NULL`,
+				},
+			} {
+				var preserved int
+				if err := second.db.QueryRowContext(ctx, check.query).Scan(&preserved); err != nil {
+					t.Fatalf("read unrelated reused-ID %s: %v", check.name, err)
+				}
+				if preserved != 1 {
+					t.Fatalf("unrelated reused-ID %s live rows = %d, want 1", check.name, preserved)
+				}
+			}
+			for _, marker := range []struct {
+				name string
+				id   string
+			}{
+				{name: "v5", id: bootstrapCredentialMigrationID},
+				{name: "v6", id: bootstrapCredentialRemediationMigrationID},
+			} {
+				var count int
+				if err := second.db.QueryRowContext(
+					ctx,
+					`SELECT COUNT(*) FROM starterapp_migrations WHERE id = ?`,
+					marker.id,
+				).Scan(&count); err != nil {
+					t.Fatalf("read %s marker: %v", marker.name, err)
+				}
+				if count != 1 {
+					t.Fatalf("%s marker rows = %d, want 1", marker.name, count)
+				}
 			}
 		})
+	}
+}
+
+func TestBootstrapCredentialRemediationIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	cfg := freshConfig(t)
+	cfg.Environment = "production"
+	cfg.Seed.AdminPassword = "stale-first-boot-password"
+
+	first, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("first BuildApp(): %v", err)
+	}
+	const rotatedPassword = "post-v6-operator-password"
+	if err := first.user.Service().SetPassword(
+		ctx,
+		seed.TenantID,
+		seed.UserID,
+		rotatedPassword,
+	); err != nil {
+		t.Fatalf("rotate post-v6 administrator password: %v", err)
+	}
+	session, err := first.authMod.Service().Login(ctx, seed.TenantID, auth.Credentials{
+		Email:    seed.UserEmail,
+		Password: rotatedPassword,
+	})
+	if err != nil {
+		t.Fatalf("create post-v6 session: %v", err)
+	}
+	plaintext, _, err := first.apiKey.Service().Issue(
+		ctx,
+		seed.TenantID,
+		seed.UserID,
+		"post-v6-integration",
+		[]string{"content:read"},
+		0,
+	)
+	if err != nil {
+		t.Fatalf("create post-v6 API key: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first app: %v", err)
+	}
+
+	second, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("second BuildApp(): %v", err)
+	}
+	defer second.Close()
+	if err := second.user.Service().VerifyPassword(
+		ctx,
+		seed.TenantID,
+		seed.UserID,
+		rotatedPassword,
+	); err != nil {
+		t.Fatalf("post-v6 password changed on restart: %v", err)
+	}
+	if err := second.user.Service().VerifyPassword(
+		ctx,
+		seed.TenantID,
+		seed.UserID,
+		cfg.Seed.AdminPassword,
+	); err == nil {
+		t.Fatal("first-boot password was re-asserted after v6")
+	}
+	if _, err := second.authMod.Service().ValidateSession(ctx, session.ID); err != nil {
+		t.Fatalf("post-v6 session was revoked on restart: %v", err)
+	}
+	if _, err := second.apiKey.Service().Verify(ctx, plaintext); err != nil {
+		t.Fatalf("post-v6 API key was revoked on restart: %v", err)
+	}
+	var markerCount int
+	if err := second.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM starterapp_migrations WHERE id = ?`,
+		bootstrapCredentialRemediationMigrationID,
+	).Scan(&markerCount); err != nil {
+		t.Fatalf("read v6 marker: %v", err)
+	}
+	if markerCount != 1 {
+		t.Fatalf("v6 marker rows = %d, want 1", markerCount)
 	}
 }
 
@@ -717,6 +900,10 @@ func TestBootstrapMigrationRunsCredentialCleanupAfterExistingV4(t *testing.T) {
 		{
 			name:  "v5 marker",
 			query: `SELECT COUNT(*) FROM starterapp_migrations WHERE id = '` + bootstrapCredentialMigrationID + `'`,
+		},
+		{
+			name:  "v6 marker",
+			query: `SELECT COUNT(*) FROM starterapp_migrations WHERE id = '` + bootstrapCredentialRemediationMigrationID + `'`,
 		},
 	} {
 		var count int
@@ -924,6 +1111,10 @@ func TestBootstrapMigrationFinalizesReplacementOwnerCredentialOnDirectUpgrade(t 
 		{
 			name:  "v5 marker",
 			query: `SELECT COUNT(*) FROM starterapp_migrations WHERE id = '` + bootstrapCredentialMigrationID + `'`,
+		},
+		{
+			name:  "v6 marker",
+			query: `SELECT COUNT(*) FROM starterapp_migrations WHERE id = '` + bootstrapCredentialRemediationMigrationID + `'`,
 		},
 	} {
 		var count int
