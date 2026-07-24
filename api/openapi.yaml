@@ -115,6 +115,7 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: '#/components/schemas/Tenant' } }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [tenants]
       summary: Create a tenant (not available in OSS)
@@ -148,6 +149,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Tenant' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     put:
       tags: [tenants]
@@ -167,6 +169,7 @@ paths:
               schema: { $ref: '#/components/schemas/Tenant' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
     delete:
@@ -176,6 +179,7 @@ paths:
       responses:
         '204': { description: Tenant deleted. }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/users:
@@ -193,10 +197,14 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: '#/components/schemas/User' } }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [users]
       summary: Create a user in the caller's tenant
-      description: A body-supplied `tenant_id` is ignored; the caller's tenant is authoritative.
+      description: |
+        A body-supplied `tenant_id` is ignored; the caller's tenant is
+        authoritative. Supplying `password` requires the reserved `admin`
+        scope; API keys cannot be issued that scope.
       operationId: createUser
       requestBody:
         required: true
@@ -211,6 +219,7 @@ paths:
               schema: { $ref: '#/components/schemas/User' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
 
   /api/v1/users/{id}:
@@ -227,10 +236,15 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/User' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     put:
       tags: [users]
       summary: Update a user (caller's tenant only)
+      description: |
+        Supplying `password` requires the reserved `admin` scope; ordinary
+        `users:write` automation credentials may update profile fields but
+        cannot create an interactive login credential.
       operationId: updateUser
       requestBody:
         required: true
@@ -245,6 +259,7 @@ paths:
               schema: { $ref: '#/components/schemas/User' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
     delete:
@@ -254,6 +269,7 @@ paths:
       responses:
         '204': { description: User deleted. }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/api-keys:
@@ -268,6 +284,7 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: '#/components/schemas/APIKey' } }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [api-keys]
       summary: Issue an API key bound to the caller
@@ -289,6 +306,7 @@ paths:
               schema: { $ref: '#/components/schemas/APIKeyIssueResponse' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/v1/api-keys/{id}:
     parameters:
@@ -300,6 +318,7 @@ paths:
       responses:
         '204': { description: Key revoked (idempotent). }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/audit-events:
@@ -325,6 +344,7 @@ paths:
               schema: { type: array, items: { $ref: '#/components/schemas/AuditEvent' } }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '405': { description: The audit log is read-only over HTTP. }
 
   /api/v1/content:
@@ -343,6 +363,7 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: '#/components/schemas/Content' } }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [content]
       summary: Create content authored by the caller
@@ -361,6 +382,7 @@ paths:
               schema: { $ref: '#/components/schemas/Content' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
 
   /api/v1/content/{id}:
@@ -377,6 +399,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Content' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     put:
       tags: [content]
@@ -396,6 +419,7 @@ paths:
               schema: { $ref: '#/components/schemas/Content' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
     delete:
@@ -405,6 +429,7 @@ paths:
       responses:
         '204': { description: Content deleted. }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/content/{id}/publish:
@@ -417,6 +442,7 @@ paths:
       responses:
         '204': { description: Published. }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/content/{id}/unpublish:
@@ -429,6 +455,7 @@ paths:
       responses:
         '204': { description: Unpublished. }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/notifications:
@@ -447,6 +474,7 @@ paths:
             application/json:
               schema: { type: array, items: { $ref: '#/components/schemas/Notification' } }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [notifications]
       summary: Create a notification for the caller
@@ -465,6 +493,7 @@ paths:
               schema: { $ref: '#/components/schemas/Notification' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/v1/notifications/{id}/read:
     parameters:
@@ -477,6 +506,7 @@ paths:
       responses:
         '204': { description: Marked read. }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /api/v1/notification-subscriptions:
@@ -497,6 +527,7 @@ paths:
               schema: { $ref: '#/components/schemas/Subscription' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
 
   /api/v1/notification-subscriptions/{id}:
@@ -510,6 +541,7 @@ paths:
       responses:
         '204': { description: Subscription removed. }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /healthz:
@@ -574,6 +606,9 @@ components:
       content: { text/plain: { schema: { type: string } } }
     Unauthorized:
       description: Missing, invalid, expired, or revoked credentials.
+      content: { text/plain: { schema: { type: string } } }
+    Forbidden:
+      description: Authenticated, but the credential lacks the required capability.
       content: { text/plain: { schema: { type: string } } }
     NotFound:
       description: No such resource in the caller's tenant (cross-tenant IDs read as not found).
@@ -643,7 +678,7 @@ components:
           type: string
           format: password
           x-max-utf8-bytes: 72
-          description: Optional login credential, limited to 72 UTF-8 bytes; omit on update to keep the current password.
+          description: Optional login credential, limited to 72 UTF-8 bytes and restricted to callers with the reserved `admin` scope; omit on update to keep the current password.
         active: { type: boolean }
 
     APIKey:

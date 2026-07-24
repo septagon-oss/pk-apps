@@ -113,6 +113,52 @@ func TestOpenAPIPasswordLimitUsesUTF8Bytes(t *testing.T) {
 	}
 }
 
+func TestOpenAPIPasswordMutationDocumentsAdminCapability(t *testing.T) {
+	t.Parallel()
+
+	spec, err := os.ReadFile(filepath.Join("..", "..", "api", "openapi.yaml"))
+	if err != nil {
+		t.Fatalf("read spec: %v", err)
+	}
+	if !strings.Contains(
+		string(spec),
+		"restricted to callers with the reserved `admin` scope",
+	) {
+		t.Fatal("UserInput.password does not document its administrator-only capability")
+	}
+	ops := specOps(t)
+	for _, operation := range []string{
+		"POST /api/v1/users",
+		"PUT /api/v1/users/{id}",
+	} {
+		if !ops[operation]["403"] {
+			t.Errorf("%s does not declare the password-capability 403 response", operation)
+		}
+	}
+}
+
+func TestOpenAPIProtectedOperationsDocumentForbidden(t *testing.T) {
+	t.Parallel()
+
+	for operation, responses := range specOps(t) {
+		parts := strings.SplitN(operation, " ", 2)
+		if len(parts) != 2 {
+			t.Fatalf("malformed parsed operation %q", operation)
+		}
+		path := parts[1]
+		protected := false
+		for _, rule := range builtinAPIScopeRules {
+			if path == rule.path || strings.HasPrefix(path, rule.path+"/") {
+				protected = true
+				break
+			}
+		}
+		if protected && !responses["403"] {
+			t.Errorf("%s is scope-protected but does not declare 403", operation)
+		}
+	}
+}
+
 func TestOpenAPISpecMatchesApp(t *testing.T) {
 	t.Parallel()
 	ops := specOps(t)

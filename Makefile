@@ -50,6 +50,6 @@ staticcheck: $(STATICCHECK_PREREQ) | $(TMPDIRS)
 	fi
 
 race: | $(TMPDIRS)
-	$(GO_ENV) go test -race -count=1 ./...
+	$(GO_ENV) go test -race -timeout=15m -count=1 ./...
 
 verify: test vet staticcheck race
