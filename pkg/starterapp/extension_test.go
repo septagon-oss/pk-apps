@@ -21,9 +21,12 @@ import (
 
 	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
 	pkmodule "github.com/septagon-oss/pk-core/pkg/module"
+	"github.com/septagon-oss/pk-core/pkg/security/identity"
 	"github.com/septagon-oss/pk-modules/pkg/audit"
 	"github.com/septagon-oss/pk-modules/pkg/portslib"
 )
+
+const extWidgetReadScope = "widgets:read"
 
 func extTestConfig(t *testing.T) *Config {
 	t.Helper()
@@ -43,6 +46,11 @@ func (widgetHandler) RegisterRoutes(mux *http.ServeMux) {
 		if !ok {
 			return // 401 already written by RequestActor
 		}
+		principal := identity.PrincipalFromContext(r.Context())
+		if !principal.HasScope("admin") && !principal.HasScope(extWidgetReadScope) {
+			http.Error(w, "forbidden: "+extWidgetReadScope+" scope required", http.StatusForbidden)
+			return
+		}
 		fmt.Fprintf(w, "widget for %s/%s", tenant, subject)
 	})
 }
@@ -58,6 +66,7 @@ func TestWithModulesContributesAModule(t *testing.T) {
 		return ModulePlugin{
 			ID:             "widget",
 			RegisterRoutes: widgetHandler{}.RegisterRoutes,
+			APIKeyScopes:   []string{extWidgetReadScope},
 			OpenAPI: []OpenAPIOperation{{
 				OperationID: "widgets.list",
 				Method:      http.MethodGet,
@@ -98,6 +107,27 @@ func TestWithModulesContributesAModule(t *testing.T) {
 	resp.Body.Close()
 	if !strings.Contains(string(b), "widget for "+seed.TenantID+"/") {
 		t.Fatalf("authenticated widget body = %q, want it to see the caller's tenant", b)
+	}
+
+	if _, _, err := app.apiKey.Service().Issue(
+		context.Background(),
+		seed.TenantID,
+		seed.UserID,
+		"widget-reader",
+		[]string{extWidgetReadScope},
+		0,
+	); err != nil {
+		t.Fatalf("issue declared extension scope: %v", err)
+	}
+	if _, _, err := app.apiKey.Service().Issue(
+		context.Background(),
+		seed.TenantID,
+		seed.UserID,
+		"typo",
+		[]string{"widgets:reed"},
+		0,
+	); err == nil || !strings.Contains(err.Error(), "unknown scope") {
+		t.Fatalf("issue undeclared extension scope error = %v, want unknown scope", err)
 	}
 
 	specResp, err := http.Get(srv.URL + "/openapi/extensions.json")
@@ -232,6 +262,21 @@ func TestWithModulesRejectsBuiltinIDCollision(t *testing.T) {
 	_, err := BuildApp(context.Background(), extTestConfig(t), WithModules(clash))
 	if err == nil || !strings.Contains(err.Error(), "collides") {
 		t.Fatalf("expected a built-in ID collision error, got %v", err)
+	}
+}
+
+func TestWithModulesRejectsReservedAPIKeyScope(t *testing.T) {
+	t.Parallel()
+	plugin := func(ModuleEnv) (ModulePlugin, error) {
+		return ModulePlugin{
+			ID:             "unsafe_scope",
+			RegisterRoutes: func(*http.ServeMux) {},
+			APIKeyScopes:   []string{"admin"},
+		}, nil
+	}
+	_, err := BuildApp(context.Background(), extTestConfig(t), WithModules(plugin))
+	if err == nil || !strings.Contains(err.Error(), "reserved for interactive authorization") {
+		t.Fatalf("expected reserved-scope error, got %v", err)
 	}
 }
 

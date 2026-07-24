@@ -206,6 +206,26 @@ func TestBuildAppNeutralizesLegacyBootstrapLabelsAndPreservesDurableIDs(t *testi
 		t.Fatalf("second BuildApp() after migration = %v", err)
 	}
 	defer second.Close()
+	if second.SeedTenantID() != releasedBootstrapTenantID {
+		t.Fatalf(
+			"second-boot advertised tenant = %q, want preserved tenant %q",
+			second.SeedTenantID(),
+			releasedBootstrapTenantID,
+		)
+	}
+	secondMux, err := second.Mux()
+	if err != nil {
+		t.Fatalf("second Mux(): %v", err)
+	}
+	secondLoginReq := httptest.NewRequest(http.MethodGet, "/admin/login", nil)
+	secondLoginRec := httptest.NewRecorder()
+	secondMux.ServeHTTP(secondLoginRec, secondLoginReq)
+	if !strings.Contains(secondLoginRec.Body.String(), `value="`+releasedBootstrapTenantID+`"`) {
+		t.Fatalf(
+			"second-boot login banner does not advertise preserved tenant ID: %s",
+			secondLoginRec.Body.String(),
+		)
+	}
 
 	var tenantCount, userCount int
 	if err := second.db.QueryRowContext(

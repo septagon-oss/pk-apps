@@ -620,6 +620,7 @@ components:
   schemas:
     LoginRequest:
       type: object
+      additionalProperties: false
       required: [tenant_id, password]
       properties:
         tenant_id: { type: string, example: tenant_local }
@@ -648,9 +649,9 @@ components:
 
     TenantInput:
       type: object
+      additionalProperties: false
       required: [slug, name]
       properties:
-        id: { type: string, description: Optional caller-assigned ID. }
         slug: { type: string }
         name: { type: string }
 
@@ -668,9 +669,9 @@ components:
 
     UserInput:
       type: object
+      additionalProperties: false
       required: [email, username]
       properties:
-        id: { type: string, description: Optional caller-assigned ID. }
         email: { type: string }
         username: { type: string }
         display_name: { type: string }
@@ -679,7 +680,9 @@ components:
           format: password
           x-max-utf8-bytes: 72
           description: Optional login credential, limited to 72 UTF-8 bytes and restricted to callers with the reserved `admin` scope; omit on update to keep the current password.
-        active: { type: boolean }
+        active:
+          type: boolean
+          description: Defaults to true on create. Omit on update to preserve the current active state.
 
     APIKey:
       type: object
@@ -698,10 +701,15 @@ components:
 
     APIKeyIssueRequest:
       type: object
+      additionalProperties: false
       required: [name]
       properties:
         name: { type: string, example: ci-bot }
-        scopes: { type: array, items: { type: string }, example: [read] }
+        scopes:
+          type: array
+          items: { type: string }
+          example: [content:read]
+          description: Must use a built-in capability or a scope declared by a contributed module; unknown names and interactive-only scopes are rejected.
         ttl_seconds: { type: integer, description: 0 = no expiry. }
 
     APIKeyIssueResponse:
@@ -739,6 +747,7 @@ components:
 
     ContentInput:
       type: object
+      additionalProperties: false
       required: [kind, slug, title]
       properties:
         kind: { type: string, example: post }
@@ -762,6 +771,7 @@ components:
 
     NotificationInput:
       type: object
+      additionalProperties: false
       required: [title, body]
       properties:
         title: { type: string }
@@ -782,6 +792,7 @@ components:
 
     SubscriptionInput:
       type: object
+      additionalProperties: false
       required: [channel]
       properties:
         category: { type: string }

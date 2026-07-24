@@ -273,18 +273,7 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		return nil, fmt.Errorf("auth module: %w", err)
 	}
 
-	// 7. API_key_management — optional audit emitter.
-	apiKeyMod, err := apikey.NewModule(
-		apikey.WithStore(apiKeyStore),
-		apikey.WithAuditEmitter(auditEmitter),
-		apikey.WithAdminRegistrar(adminReg),
-		apikey.WithHealthRegistrar(healthReg),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("api_key module: %w", err)
-	}
-
-	// 8. Content_management — optional tenant + audit dependencies.
+	// 7. Content_management — optional tenant + audit dependencies.
 	contentMod, err := content.NewModule(
 		content.WithStore(contentStore),
 		content.WithTenantService(tenantMod.Service()),
@@ -296,7 +285,7 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		return nil, fmt.Errorf("content module: %w", err)
 	}
 
-	// 9. Notification_management — optional user reader + audit.
+	// 8. Notification_management — optional user reader + audit.
 	notificationMod, err := notification.NewModule(
 		notification.WithStore(notificationStore),
 		notification.WithUserReader(userMod.Service()),
@@ -354,17 +343,6 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		content.ModuleID,
 		notification.ModuleID,
 	}
-	entries := []pkmodule.Entry{
-		{ID: admin.ModuleID, New: adminMod.Compose},
-		{ID: healthmod.ModuleID, New: healthMod.Compose},
-		{ID: tenant.ModuleID, New: tenantMod.Compose},
-		{ID: user.ModuleID, New: userMod.Compose},
-		{ID: audit.ModuleID, New: auditMod.Compose},
-		{ID: auth.ModuleID, New: authMod.Compose},
-		{ID: apikey.ModuleID, New: apiKeyMod.Compose},
-		{ID: content.ModuleID, New: contentMod.Compose},
-		{ID: notification.ModuleID, New: notificationMod.Compose},
-	}
 
 	// Contributed modules (starterapp.WithModules). Each is built against the
 	// shared DB + registrars, joins the catalog when it supplies a Compose,
@@ -374,7 +352,9 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		builtinIDs[id] = true
 	}
 	var extraPlugins []ModulePlugin
+	var extraEntries []pkmodule.Entry
 	var openAPIOperations []OpenAPIOperation
+	var apiKeyScopes []string
 	openAPIRoutes := make(map[string]string)
 	openAPIOperationIDs := make(map[string]string)
 	env := ModuleEnv{
@@ -407,12 +387,40 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		}
 		builtinIDs[plugin.ID] = true
 		if plugin.Compose != nil {
-			entries = append(entries, pkmodule.Entry{ID: plugin.ID, New: plugin.Compose})
+			extraEntries = append(extraEntries, pkmodule.Entry{ID: plugin.ID, New: plugin.Compose})
 			modules = append(modules, plugin.ID)
 		}
 		extraPlugins = append(extraPlugins, plugin)
 		openAPIOperations = append(openAPIOperations, plugin.OpenAPI...)
+		apiKeyScopes = append(apiKeyScopes, plugin.APIKeyScopes...)
 	}
+
+	// 9. API_key_management is constructed after contributed modules declare
+	// their machine scopes. Issuance therefore rejects typos without closing
+	// the extension seam: every application-owned capability must be explicit.
+	apiKeyMod, err := apikey.NewModule(
+		apikey.WithStore(apiKeyStore),
+		apikey.WithAuditEmitter(auditEmitter),
+		apikey.WithAdminRegistrar(adminReg),
+		apikey.WithHealthRegistrar(healthReg),
+		apikey.WithAllowedScopes(apiKeyScopes...),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("api_key module: %w", err)
+	}
+
+	entries := []pkmodule.Entry{
+		{ID: admin.ModuleID, New: adminMod.Compose},
+		{ID: healthmod.ModuleID, New: healthMod.Compose},
+		{ID: tenant.ModuleID, New: tenantMod.Compose},
+		{ID: user.ModuleID, New: userMod.Compose},
+		{ID: audit.ModuleID, New: auditMod.Compose},
+		{ID: auth.ModuleID, New: authMod.Compose},
+		{ID: apikey.ModuleID, New: apiKeyMod.Compose},
+		{ID: content.ModuleID, New: contentMod.Compose},
+		{ID: notification.ModuleID, New: notificationMod.Compose},
+	}
+	entries = append(entries, extraEntries...)
 
 	bundle := pkmodule.NewBundle(BundleName, entries, modules)
 	catalog, err := pkmodule.NewCatalog().Add(bundle).Build()

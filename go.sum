@@ -18,6 +18,8 @@ github.com/septagon-oss/pk-design v0.1.0 h1:L+9EC4x9h+wS5nKI1nZnXiF1GNDcrv5Gm5eE
 github.com/septagon-oss/pk-design v0.1.0/go.mod h1:gHPDkDfgfgEAOGeSG7mv3gtN0DyDLh7KpxsCg6onsv4=
 github.com/septagon-oss/pk-modules v0.3.1-0.20260724004906-59549b609c08 h1:isFX3LL9iJOZgq3rbyoOiT+NkkmUvJJFnumwxc0pfmo=
 github.com/septagon-oss/pk-modules v0.3.1-0.20260724004906-59549b609c08/go.mod h1:79rUjDjUJDkJKdkJSpFsvoNa/45mVjWML0mq12O5AIE=
+github.com/septagon-oss/pk-modules v0.3.1-0.20260724100825-05095a2fa84d h1:4txNflPB9kXRaUvOj1Bc5kU2vqxY/Lw/Z8NwgBru6U0=
+github.com/septagon-oss/pk-modules v0.3.1-0.20260724100825-05095a2fa84d/go.mod h1:79rUjDjUJDkJKdkJSpFsvoNa/45mVjWML0mq12O5AIE=
 github.com/septagon-oss/pk-runtime v0.1.0 h1:Xbc3qksZMcwfJ3i7fD+DoFKmm8Dszbqza/oZ7sZ4n0E=
 github.com/septagon-oss/pk-runtime v0.1.0/go.mod h1:jvJKQeDUp5bo4BxXMKggWeHsEayWPgreMSNTnDHBQU0=
 golang.org/x/crypto v0.52.0 h1:RMs7fP2rXdep0CftQlK8Uf+kibLm7qkCcradZWYz988=

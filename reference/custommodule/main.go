@@ -7,8 +7,9 @@
 // and contributes one custom, tenant-scoped "widgets" module through
 // starterapp.WithModules. The custom routes are mounted on the same mux as the
 // built-ins, so they inherit the identity middleware, the anonymous-mutation
-// gate, and the request-body cap for free — a body-supplied tenant is ignored;
-// attribution comes from the authenticated principal via portslib.RequestActor.
+// gate, and the request-body cap. The module still owns authorization: every
+// route below checks widgets:read or widgets:write, while attribution comes
+// from the authenticated principal via portslib.RequestActor.
 //
 // Run it, then:
 //
@@ -23,19 +24,19 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/septagon-oss/pk-apps/pkg/starterapp"
+	"github.com/septagon-oss/pk-core/pkg/security/identity"
 	"github.com/septagon-oss/pk-modules/pkg/portslib"
 
 	_ "modernc.org/sqlite"
@@ -46,10 +47,16 @@ func main() {
 	defer cancel()
 
 	cfg := starterapp.DefaultConfig()
+	starterapp.ApplyAddressOverrides(cfg, os.Getenv)
 	if err := starterapp.Run(ctx, cfg, starterapp.WithModules(widgetModule)); err != nil {
 		log.Fatal(err)
 	}
 }
+
+const (
+	widgetReadScope  = "widgets:read"
+	widgetWriteScope = "widgets:write"
+)
 
 // widgetModule is an ExtraModule: it builds its store on the starter's shared
 // *sql.DB and returns a plugin that mounts the widget routes. It supplies no
@@ -64,11 +71,21 @@ func widgetModule(env starterapp.ModuleEnv) (starterapp.ModulePlugin, error) {
 	return starterapp.ModulePlugin{
 		ID:             "widget",
 		RegisterRoutes: h.RegisterRoutes,
-		// A public, unauthenticated count endpoint — reachable without a
-		// bearer, bypassing the mutation gate, but still tenant-derived from
-		// the {slug} path rather than a credential. This is how a module
-		// exposes a public surface (a join form, a webhook, a status page).
-		RegisterPublicRoutes: h.RegisterPublicRoutes,
+		APIKeyScopes:   []string{widgetReadScope, widgetWriteScope},
+		OpenAPI: []starterapp.OpenAPIOperation{
+			{
+				OperationID: "listWidgets", Method: http.MethodGet, Path: "/api/v1/widgets",
+				Summary: "List widgets in the authenticated tenant", SuccessStatus: http.StatusOK,
+			},
+			{
+				OperationID: "createWidget", Method: http.MethodPost, Path: "/api/v1/widgets",
+				Summary: "Create a widget owned by the authenticated actor", SuccessStatus: http.StatusCreated,
+			},
+			{
+				OperationID: "getWidget", Method: http.MethodGet, Path: "/api/v1/widgets/{id}",
+				Summary: "Get a widget in the authenticated tenant", SuccessStatus: http.StatusOK,
+			},
+		},
 	}, nil
 }
 
@@ -84,10 +101,8 @@ type widget struct {
 type widgetStore struct{ db *sql.DB }
 
 func newWidgetStore(db *sql.DB) (*widgetStore, error) {
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS widgets (
-		id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, owner_id TEXT NOT NULL, name TEXT NOT NULL)`)
-	if err != nil {
-		return nil, fmt.Errorf("widget schema: %w", err)
+	if err := applyWidgetMigrations(db); err != nil {
+		return nil, err
 	}
 	return &widgetStore{db: db}, nil
 }
@@ -136,52 +151,73 @@ func (h *widgetHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("/api/v1/widgets/", h)
 }
 
-// RegisterPublicRoutes mounts an anonymous endpoint: GET /w/{tenant}/count
-// returns how many widgets a tenant has, no bearer required. The tenant comes
-// from the path, not a credential — the public equivalent of a status page.
-//
-//	curl -s localhost:8080/w/tenant_local/count
-func (h *widgetHandler) RegisterPublicRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/w/", func(w http.ResponseWriter, r *http.Request) {
-		parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/w/"), "/"), "/")
-		if len(parts) != 2 || parts[1] != "count" || parts[0] == "" {
-			http.NotFound(w, r)
-			return
-		}
-		items, err := h.store.list(parts[0])
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"tenant": parts[0], "widgets": len(items)}, nil)
-	})
+func requestActorWithScope(
+	w http.ResponseWriter,
+	r *http.Request,
+	scope string,
+) (tenantID, subject string, ok bool) {
+	tenantID, subject, ok = portslib.RequestActor(w, r)
+	if !ok {
+		return "", "", false
+	}
+	principal := identity.PrincipalFromContext(r.Context())
+	if !principal.HasScope("admin") && !principal.HasScope(scope) {
+		http.Error(w, "forbidden: "+scope+" scope required", http.StatusForbidden)
+		return "", "", false
+	}
+	return tenantID, subject, true
 }
 
 func (h *widgetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	tenant, owner, ok := portslib.RequestActor(w, r)
-	if !ok {
-		return // 401 written by RequestActor
-	}
 	id := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/v1/widgets"), "/")
 	switch {
 	case id == "" && r.Method == http.MethodGet:
+		tenant, _, ok := requestActorWithScope(w, r, widgetReadScope)
+		if !ok {
+			return
+		}
 		items, err := h.store.list(tenant)
 		writeJSON(w, http.StatusOK, items, err)
 	case id == "" && r.Method == http.MethodPost:
+		tenant, owner, ok := requestActorWithScope(w, r, widgetWriteScope)
+		if !ok {
+			return
+		}
 		var wg widget
-		if json.NewDecoder(r.Body).Decode(&wg) != nil || strings.TrimSpace(wg.Name) == "" {
-			http.Error(w, "name is required", http.StatusBadRequest)
+		if err := portslib.DecodeJSONBody(r.Body, &wg); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(wg.Name) == "" {
+			http.Error(w, "widget: name is required", http.StatusBadRequest)
 			return
 		}
 		wg.TenantID, wg.OwnerID = tenant, owner // server owns identity
-		wg.ID = strconv.FormatInt(time.Now().UnixNano(), 36)
+		var err error
+		wg.ID, err = newWidgetID()
+		if err != nil {
+			http.Error(w, "widget: generate ID", http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, http.StatusCreated, &wg, h.store.create(&wg))
 	case id != "" && r.Method == http.MethodGet:
+		tenant, _, ok := requestActorWithScope(w, r, widgetReadScope)
+		if !ok {
+			return
+		}
 		wg, err := h.store.get(tenant, id)
 		writeJSON(w, http.StatusOK, wg, err)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func newWidgetID() (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	return "wid_" + hex.EncodeToString(random[:]), nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any, err error) {

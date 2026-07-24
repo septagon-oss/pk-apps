@@ -253,7 +253,7 @@ func TestOpenAPISpecMatchesApp(t *testing.T) {
 	call("DELETE", "/api/v1/users/{id}", "/api/v1/users/"+id(u, "id"), "", true, 204)
 
 	// --- api keys ---
-	k := call("POST", "/api/v1/api-keys", "/api/v1/api-keys", `{"name":"conf-key","scopes":["read"]}`, true, 201)
+	k := call("POST", "/api/v1/api-keys", "/api/v1/api-keys", `{"name":"conf-key","scopes":["content:read"]}`, true, 201)
 	call("GET", "/api/v1/api-keys", "/api/v1/api-keys", "", true, 200)
 	key, _ := k["key"].(map[string]any)
 	if key == nil {
