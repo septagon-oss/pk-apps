@@ -117,6 +117,18 @@ func NewModule(opts ...Option) (*Module, error) {
 	if err := registerAdmin(cfg.admin); err != nil {
 		return nil, err
 	}
+	// The insights page needs the constructed module (it reads the service),
+	// so it registers after the resource.
+	if cfg.admin != nil {
+		if err := cfg.admin.RegisterPage(portslib.AdminPage{
+			ModuleID: ModuleID,
+			Path:     InsightsPath,
+			Title:    "Poll insights",
+			Render:   module.insightsPage,
+		}); err != nil {
+			return nil, err
+		}
+	}
 	if err := registerHealth(cfg.health, store); err != nil {
 		return nil, err
 	}
