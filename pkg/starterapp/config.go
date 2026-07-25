@@ -25,6 +25,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/septagon-oss/pk-modules/pkg/portslib"
 )
 
 // Config is the parsed contents of a starter config.yaml.
@@ -71,8 +73,10 @@ type SeedConfig struct {
 // complete, bootable config on its own when no config.yaml is present.
 func DefaultConfig() *Config {
 	return &Config{
-		AppName:     "platformkit",
-		AppVersion:  "0.4.0",
+		AppName: "platformkit",
+		// The API contract version, single-sourced from the module set so the
+		// banner, module metadata, and OpenAPI document cannot disagree.
+		AppVersion:  portslib.ReleaseVersion,
 		Environment: "development",
 		HTTP: HTTPConfig{
 			Addr:            "127.0.0.1:8080",
