@@ -4,10 +4,10 @@
 
 // admin_auth.go owns the browser-facing login flow that closes the v0.1.0
 // open-admin dashboard. guardAdmin requires an authenticated principal to view
-// any admin route; anonymous visitors are redirected to a minimal login page
-// that authenticates against the auth module, sets the HttpOnly session cookie,
-// and redirects back into the shell. Logout revokes the session and clears the
-// cookie.
+// any admin route; anonymous visitors are redirected to a login page rendered
+// by the typed view in admin_login_view.go, which authenticates against the
+// auth module, sets the HttpOnly session cookie, and redirects back into the
+// shell. Logout revokes the session and clears the cookie.
 //
 // ADR: ADR-0009 (ports-only module communication), ADR-0029 (file purpose declaration).
 // Convention: C-14 (every Go file declares its purpose).
@@ -27,279 +27,6 @@ const (
 	adminLoginPath  = "/admin/login"
 	adminLogoutPath = "/admin/logout"
 )
-
-var adminLoginTemplate = template.Must(template.New("admin-login").Parse(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>Sign in · {{.AppName}}</title>
-<style>
-  :root {
-    --ink: #15221f;
-    --muted: #62706b;
-    --paper: #f2efe7;
-    --sheet: #fffdf7;
-    --field: #12201d;
-    --line: #d2cec2;
-    --signal: #d8f35d;
-    --accent: #0f5d4e;
-    --danger: #a33131;
-    --display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
-    --body: "IBM Plex Sans", Aptos, "Helvetica Neue", sans-serif;
-    --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
-  }
-  * { box-sizing: border-box; }
-  html { min-width: 320px; background: var(--paper); }
-  body {
-    min-height: 100vh;
-    margin: 0;
-    color: var(--ink);
-    background: var(--paper);
-    font-family: var(--body);
-    line-height: 1.5;
-  }
-  button, input { font: inherit; }
-  :focus-visible { outline: 3px solid #326de6; outline-offset: 3px; }
-  .skip {
-    position: fixed;
-    z-index: 10;
-    inset: 8px auto auto 8px;
-    padding: 10px 14px;
-    color: white;
-    background: var(--accent);
-    transform: translateY(-160%);
-  }
-  .skip:focus { transform: translateY(0); }
-  .shell {
-    min-height: 100vh;
-    display: grid;
-    grid-template-columns: minmax(300px, .9fr) minmax(480px, 1.1fr);
-  }
-  .story {
-    min-height: 100%;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-    gap: 48px;
-    padding: clamp(28px, 6vw, 76px);
-    color: #eff4e9;
-    background: var(--field);
-    border-right: 1px solid rgba(255, 255, 255, .12);
-  }
-  .brand {
-    display: inline-flex;
-    align-items: center;
-    gap: 13px;
-    color: inherit;
-    font-size: 13px;
-    font-weight: 750;
-    letter-spacing: .04em;
-  }
-  .mark {
-    width: 33px;
-    height: 33px;
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 3px;
-    padding: 5px;
-    border: 1px solid rgba(255, 255, 255, .42);
-  }
-  .mark i { display: block; background: var(--signal); }
-  .mark i:nth-child(2) { background: transparent; border: 1px solid rgba(255,255,255,.5); }
-  .mark i:nth-child(3) { grid-column: 1 / -1; height: 4px; align-self: end; }
-  .story-copy { max-width: 570px; }
-  .eyebrow {
-    margin: 0 0 20px;
-    color: var(--signal);
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: .15em;
-    text-transform: uppercase;
-  }
-  .story h1 {
-    max-width: 8ch;
-    margin: 0;
-    font-family: var(--display);
-    font-size: clamp(46px, 7vw, 92px);
-    font-weight: 500;
-    letter-spacing: -.045em;
-    line-height: .92;
-  }
-  .story-copy > p:last-child {
-    max-width: 42ch;
-    margin: 28px 0 0;
-    color: #b8c3bc;
-    font-size: clamp(15px, 1.5vw, 18px);
-  }
-  .story-foot {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px 22px;
-    color: #9eada4;
-    font-family: var(--mono);
-    font-size: 10px;
-    letter-spacing: .08em;
-    text-transform: uppercase;
-  }
-  .signin {
-    min-width: 0;
-    display: grid;
-    place-items: center;
-    padding: clamp(24px, 7vw, 88px);
-    background: var(--paper);
-  }
-  .panel { width: min(100%, 470px); }
-  .panel-head { margin-bottom: 34px; }
-  .kicker {
-    margin: 0 0 10px;
-    color: var(--accent);
-    font-family: var(--mono);
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: .13em;
-    text-transform: uppercase;
-  }
-  .panel h2 {
-    margin: 0;
-    font-family: var(--display);
-    font-size: clamp(38px, 5vw, 55px);
-    font-weight: 500;
-    letter-spacing: -.035em;
-    line-height: 1;
-  }
-  .sub { margin: 13px 0 0; color: var(--muted); font-size: 14px; }
-  .notice {
-    margin: 0 0 22px;
-    padding: 12px 14px;
-    border-left: 4px solid var(--danger);
-    color: #672121;
-    background: #fff1ee;
-    font-size: 13px;
-  }
-  .development-note {
-    margin: 0 0 22px;
-    padding: 13px 15px;
-    border: 1px solid #cad79c;
-    background: #f6fadf;
-    font-size: 12px;
-  }
-  .development-note strong { display: block; margin-bottom: 3px; }
-  .development-note code { font-family: var(--mono); }
-  .field { margin-top: 19px; }
-  label {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 7px;
-    font-size: 12px;
-    font-weight: 750;
-  }
-  label span {
-    color: var(--muted);
-    font-family: var(--mono);
-    font-size: 10px;
-    font-weight: 500;
-  }
-  input {
-    width: 100%;
-    min-height: 48px;
-    padding: 10px 12px;
-    color: var(--ink);
-    background: var(--sheet);
-    border: 1px solid #aaa89f;
-    border-radius: 3px;
-  }
-  input:hover { border-color: #686d68; }
-  button {
-    width: 100%;
-    min-height: 50px;
-    margin-top: 26px;
-    padding: 10px 18px;
-    color: var(--field);
-    background: var(--signal);
-    border: 1px solid #aabe45;
-    border-radius: 3px;
-    font-weight: 800;
-    cursor: pointer;
-    transition: transform 160ms cubic-bezier(.22,1,.36,1), background-color 160ms ease;
-  }
-  button:hover { background: #e5fa82; transform: translateY(-1px); }
-  .secure {
-    margin: 18px 0 0;
-    color: var(--muted);
-    font-size: 11px;
-    text-align: center;
-  }
-  @media (max-width: 820px) {
-    .shell { grid-template-columns: 1fr; }
-    .story { min-height: auto; padding: 24px; gap: 34px; }
-    .story h1 { max-width: 12ch; font-size: clamp(40px, 12vw, 65px); }
-    .story-copy > p:last-child { margin-top: 18px; }
-    .story-foot { display: none; }
-    .signin { place-items: start center; padding: 42px 20px 64px; }
-  }
-  @media (max-width: 420px) {
-    .story-copy > p:last-child { display: none; }
-    .panel h2 { font-size: 39px; }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
-  }
-</style>
-</head>
-<body>
-<a class="skip" href="#signin">Skip to sign in</a>
-<main class="shell">
-  <section class="story" aria-labelledby="product-title">
-    <div class="brand">
-      <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
-      <span>PLATFORMKIT / OPERATOR</span>
-    </div>
-    <div class="story-copy">
-      <p class="eyebrow">A composed system, in one place</p>
-      <h1 id="product-title">Run the work. Keep the context.</h1>
-      <p>Inspect modules, manage tenant data, and follow operational changes from a console that stays close to the code.</p>
-    </div>
-    <div class="story-foot"><span>Local-first</span><span>Scope-aware</span><span>Open source</span></div>
-  </section>
-  <section class="signin" id="signin" aria-labelledby="signin-title">
-    <div class="panel">
-      <header class="panel-head">
-        <p class="kicker">{{.Environment}} workspace</p>
-        <h2 id="signin-title">Welcome back.</h2>
-        <p class="sub">Sign in with an administrator account for this tenant.</p>
-      </header>
-      {{if .Error}}<div class="notice" role="alert" aria-live="assertive">{{.Error}}</div>{{end}}
-      {{if .Development}}
-      <aside class="development-note">
-        <strong>Development workspace</strong>
-        Tenant <code>{{.BootstrapTenant}}</code> and email <code>{{.BootstrapEmail}}</code> are prefilled. Use the local password printed in the terminal.
-      </aside>
-      {{end}}
-      <form method="post" action="/admin/login">
-        <div class="field">
-          <label for="tenant_id">Tenant ID <span>required</span></label>
-          <input id="tenant_id" name="tenant_id" value="{{.TenantID}}" autocomplete="organization" maxlength="128" required autofocus>
-        </div>
-        <div class="field">
-          <label for="email">Email <span>required</span></label>
-          <input id="email" name="email" value="{{.Email}}" type="email" autocomplete="username" maxlength="320" required>
-        </div>
-        <div class="field">
-          <label for="password">Password <span>required</span></label>
-          <input id="password" name="password" type="password" autocomplete="current-password" maxlength="1024" required>
-        </div>
-        <button type="submit">Enter operator workspace</button>
-      </form>
-      <p class="secure">Session cookies are HttpOnly and tenant-scoped requests remain isolated.</p>
-    </div>
-  </section>
-</main>
-</body>
-</html>`))
 
 var adminForbiddenTemplate = template.Must(template.New("admin-forbidden").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -381,8 +108,7 @@ func (a *App) renderAdminLogin(w http.ResponseWriter, tenantID, email, errMsg st
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(status)
-	_ = adminLoginTemplate.Execute(w, adminLoginView{
+	page, err := renderLoginView(adminLoginView{
 		Error:           errMsg,
 		TenantID:        tenantID,
 		Email:           email,
@@ -392,6 +118,12 @@ func (a *App) renderAdminLogin(w http.ResponseWriter, tenantID, email, errMsg st
 		BootstrapTenant: a.seedTenantID,
 		BootstrapEmail:  a.seedEmail,
 	})
+	if err != nil {
+		http.Error(w, "could not render sign-in page", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(page)
 }
 
 func renderAdminForbidden(w http.ResponseWriter) {
