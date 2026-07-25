@@ -13,6 +13,7 @@ import (
 
 	"github.com/septagon-oss/pk-modules/pkg/apikey"
 	"github.com/septagon-oss/pk-modules/pkg/auth"
+	"github.com/septagon-oss/pk-modules/pkg/user"
 )
 
 type resolverAuthService struct {
@@ -69,7 +70,7 @@ func TestSessionResolverGrantsConsoleOnlyToSeededAdministrator(t *testing.T) {
 		t.Helper()
 		resolver := newSessionResolver(resolverAuthService{session: &auth.Session{
 			ID: "session", UserID: subject, TenantID: "tenant",
-		}}, adminSubject)
+		}}, resolverUserReader{active: true}, adminSubject)
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Set("Authorization", "Bearer session")
 		principal, err := resolver(req)
@@ -101,7 +102,7 @@ func TestAPIKeyResolverPropagatesModuleScopesAndFiltersInteractiveScopes(t *test
 		UserID:   "service",
 		TenantID: "tenant",
 		Scopes:   []string{"extension:read", scopeAdmin, scopeConsoleAccess},
-	}})
+	}}, resolverUserReader{active: true})
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Bearer pk_example")
 	principal, err := resolver(req)
@@ -123,4 +124,72 @@ func containsScope(scopes []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// resolverUserReader is a UserBoundaryReader stub: `active` controls whether
+// the credential's owner reads back as an existing, active user.
+type resolverUserReader struct {
+	active  bool
+	missing bool
+}
+
+func (u resolverUserReader) Get(context.Context, string, string) (*user.User, error) {
+	if u.missing {
+		return nil, errors.New("not found")
+	}
+	return &user.User{Active: u.active}, nil
+}
+
+func (u resolverUserReader) GetByEmail(context.Context, string, string) (*user.User, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (u resolverUserReader) GetByUsername(context.Context, string, string) (*user.User, error) {
+	return nil, errors.New("not implemented")
+}
+
+func TestSessionResolverRejectsDeletedOrInactiveOwner(t *testing.T) {
+	t.Parallel()
+	for name, reader := range map[string]resolverUserReader{
+		"deleted":  {missing: true},
+		"inactive": {active: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resolver := newSessionResolver(resolverAuthService{session: &auth.Session{
+				ID: "session", UserID: "admin", TenantID: "tenant",
+			}}, reader, "admin")
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Authorization", "Bearer session")
+			principal, err := resolver(req)
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if principal.Subject != "" || len(principal.Scopes) != 0 {
+				t.Fatalf("%s owner still resolved to %+v; the session must not outlive the user", name, principal)
+			}
+		})
+	}
+}
+
+func TestAPIKeyResolverRejectsDeletedOrInactiveOwner(t *testing.T) {
+	t.Parallel()
+	for name, reader := range map[string]resolverUserReader{
+		"deleted":  {missing: true},
+		"inactive": {active: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resolver := newAPIKeyResolver(resolverAPIKeyService{key: &apikey.APIKey{
+				UserID: "service", TenantID: "tenant", Scopes: []string{"extension:read"},
+			}}, reader)
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Authorization", "Bearer pk_example")
+			principal, err := resolver(req)
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if principal.Subject != "" || len(principal.Scopes) != 0 {
+				t.Fatalf("%s owner still resolved to %+v; the API key must not outlive the user", name, principal)
+			}
+		})
+	}
 }

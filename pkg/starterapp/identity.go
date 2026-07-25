@@ -22,6 +22,7 @@ import (
 	"github.com/septagon-oss/pk-core/pkg/security/identity"
 	"github.com/septagon-oss/pk-modules/pkg/apikey"
 	"github.com/septagon-oss/pk-modules/pkg/auth"
+	"github.com/septagon-oss/pk-modules/pkg/user"
 )
 
 const (
@@ -61,7 +62,7 @@ func bearerToken(r *http.Request) string {
 // so public routes still serve and a stale cookie degrades to logged-out
 // rather than hard-failing; protected handlers reject anonymous callers
 // themselves via the tenant they require.
-func newSessionResolver(svc auth.AuthService, adminSubject string) identity.ResolverFunc {
+func newSessionResolver(svc auth.AuthService, users user.UserBoundaryReader, adminSubject string) identity.ResolverFunc {
 	cookieName := sessionCookieName()
 	return func(r *http.Request) (identity.Principal, error) {
 		sid := ""
@@ -78,6 +79,9 @@ func newSessionResolver(svc auth.AuthService, adminSubject string) identity.Reso
 		if err != nil || sess == nil {
 			return identity.Principal{}, nil
 		}
+		if !activeUser(r, users, sess.TenantID, sess.UserID) {
+			return identity.Principal{}, nil
+		}
 		scopes := []string{scopeAuthenticated}
 		if sess.UserID == adminSubject {
 			scopes = append(scopes, scopeAdmin, scopeConsoleAccess, scopeUsersWrite)
@@ -91,12 +95,29 @@ func newSessionResolver(svc auth.AuthService, adminSubject string) identity.Reso
 	}
 }
 
+// activeUser reports whether a credential's owner still exists and is active.
+// Credentials outlive their owner: deleting or deactivating a user leaves that
+// user's session and API-key rows in place, so without this check an orphaned
+// credential keeps authenticating (with its original privileges) until it
+// expires. A nil reader keeps the credential valid so a host composing without
+// the user module is not locked out.
+func activeUser(r *http.Request, users user.UserBoundaryReader, tenantID, userID string) bool {
+	if users == nil || userID == "" {
+		return true
+	}
+	u, err := users.Get(r.Context(), tenantID, userID)
+	if err != nil || u == nil {
+		return false
+	}
+	return u.Active
+}
+
 // newAPIKeyResolver resolves identity from an Authorization: Bearer <api-key>
 // header. A token that is not in API-key format, or that fails verification,
 // yields an anonymous principal so the resolver chain falls through to the
 // session resolver. The key carries its own tenant, which is why API-key
 // lookup is (correctly) global: the credential itself selects the tenant.
-func newAPIKeyResolver(svc apikey.APIKeyService) identity.ResolverFunc {
+func newAPIKeyResolver(svc apikey.APIKeyService, users user.UserBoundaryReader) identity.ResolverFunc {
 	return func(r *http.Request) (identity.Principal, error) {
 		tok := bearerToken(r)
 		if tok == "" {
@@ -104,6 +125,9 @@ func newAPIKeyResolver(svc apikey.APIKeyService) identity.ResolverFunc {
 		}
 		key, err := svc.Verify(r.Context(), tok)
 		if err != nil || key == nil {
+			return identity.Principal{}, nil
+		}
+		if !activeUser(r, users, key.TenantID, key.UserID) {
 			return identity.Principal{}, nil
 		}
 		scopes := make([]string, 0, len(key.Scopes))

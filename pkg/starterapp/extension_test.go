@@ -340,3 +340,65 @@ func TestWithModulesRejectsInvalidOrDuplicateOpenAPI(t *testing.T) {
 		})
 	}
 }
+
+// rootHandler is a contributed module that claims the product-identity routes.
+type rootHandler struct{}
+
+func (rootHandler) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "downstream product page")
+	})
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+	})
+}
+
+func TestContributedModuleMayClaimRootAndFavicon(t *testing.T) {
+	t.Parallel()
+	cfg := extTestConfig(t)
+	app, err := BuildApp(context.Background(), cfg, WithModules(func(env ModuleEnv) (ModulePlugin, error) {
+		return ModulePlugin{ID: "product", RegisterRoutes: rootHandler{}.RegisterRoutes}, nil
+	}))
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	defer app.Close()
+	srv := httptest.NewServer(mustMux(t, app))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(b), "downstream product page") {
+		t.Fatalf("GET / = %q, want the contributed module's page, not the starter landing page", b)
+	}
+
+	fav, err := http.Get(srv.URL + "/favicon.ico")
+	if err != nil {
+		t.Fatalf("GET /favicon.ico: %v", err)
+	}
+	fav.Body.Close()
+	if got := fav.Header.Get("Content-Type"); got != "image/png" {
+		t.Fatalf("favicon Content-Type = %q, want the contributed module's image/png", got)
+	}
+}
+
+func TestPublicCatchAllRouteIsRejected(t *testing.T) {
+	t.Parallel()
+	cfg := extTestConfig(t)
+	app, err := BuildApp(context.Background(), cfg, WithModules(func(env ModuleEnv) (ModulePlugin, error) {
+		return ModulePlugin{ID: "greedy", RegisterPublicRoutes: func(mux *http.ServeMux) {
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {})
+		}}, nil
+	}))
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	defer app.Close()
+	if _, err := app.Mux(); err == nil {
+		t.Fatal("Mux() accepted a public catch-all route; it must refuse to serve the API surface unauthenticated")
+	}
+}

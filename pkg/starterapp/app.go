@@ -39,6 +39,7 @@ import (
 	"expvar"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	pkmodule "github.com/septagon-oss/pk-core/pkg/module"
 	"github.com/septagon-oss/pk-core/pkg/security/cookies"
@@ -487,6 +488,14 @@ func (a *App) Close() error {
 // Mux assembles the public HTTP routing surface and returns the http.Handler
 // to serve. Every wrapper and test uses this same routine so the routes under
 // test exactly match the binary.
+// routeClaimed reports whether an exact pattern is already registered on the
+// mux, so the starter can yield product-identity routes to contributed modules
+// instead of panicking on double registration.
+func routeClaimed(mux *http.ServeMux, path string) bool {
+	_, pattern := mux.Handler(&http.Request{Method: http.MethodGet, URL: &url.URL{Path: path}})
+	return pattern == path
+}
+
 func (a *App) Mux() (http.Handler, error) {
 	if a == nil {
 		return nil, fmt.Errorf("starterapp: nil app")
@@ -531,6 +540,14 @@ func (a *App) Mux() (http.Handler, error) {
 		}
 	}
 
+	// A public catch-all would match every request, so the dispatcher below
+	// would serve the entire API surface — including all built-in mutations —
+	// without the authentication gate. Refuse to boot instead of silently
+	// widening the perimeter.
+	if havePublic && routeClaimed(publicMux, "/") {
+		return nil, fmt.Errorf("starterapp: a contributed module registered public route %q: a public catch-all would bypass authentication for the whole surface; register specific public paths instead", "/")
+	}
+
 	// Health endpoint at /healthz (the module's APIPath constant).
 	a.health.HTTPHandler().RegisterRoutes(mux)
 
@@ -551,12 +568,18 @@ func (a *App) Mux() (http.Handler, error) {
 	// Machine-readable operation discovery for contributed modules.
 	mux.HandleFunc("/openapi/extensions.json", a.extensionOpenAPIHandler)
 
-	// A real favicon keeps browser smoke checks and developer consoles clean.
-	// The exact route wins over the catch-all landing-page handler below.
-	mux.HandleFunc("/favicon.ico", faviconHandler)
-
-	// Root product landing page — useful for browser and curl smoke checks.
-	mux.HandleFunc("/", a.indexHandler)
+	// The landing page and favicon are product identity, so a contributed
+	// module may claim them (via RegisterRoutes) and the starter yields.
+	// Operational routes (/healthz, /live, /ready, /metrics, /openapi) stay
+	// reserved: colliding with those is a composition error and fails loudly.
+	if !routeClaimed(mux, "/favicon.ico") {
+		// A real favicon keeps browser smoke checks and developer consoles clean.
+		mux.HandleFunc("/favicon.ico", faviconHandler)
+	}
+	if !routeClaimed(mux, "/") {
+		// Root product landing page — useful for browser and curl smoke checks.
+		mux.HandleFunc("/", a.indexHandler)
+	}
 
 	// Wrap the whole surface: the identity middleware resolves an API-key or
 	// session credential into a Principal on every request (anonymous when
@@ -564,8 +587,8 @@ func (a *App) Mux() (http.Handler, error) {
 	// /api/v1 as defense in depth. Per-handler tenant scoping reads the
 	// Principal the middleware attaches.
 	resolver := identity.Chain(
-		newAPIKeyResolver(a.apiKey.Service()),
-		newSessionResolver(a.authMod.Service(), a.adminSubject),
+		newAPIKeyResolver(a.apiKey.Service(), a.user.Service()),
+		newSessionResolver(a.authMod.Service(), a.user.Service(), a.adminSubject),
 	)
 	// The authenticated surface sits behind the mutation gate. When contributed
 	// modules registered public routes, a thin dispatcher checks the public mux

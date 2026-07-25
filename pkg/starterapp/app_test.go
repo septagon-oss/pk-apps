@@ -249,8 +249,8 @@ func TestRoutesAreRegistered(t *testing.T) {
 	if strings.Contains(body, seed.UserEmail) || strings.Contains(body, seed.UserPass) {
 		t.Error("public root index must not expose development credentials")
 	}
-	if !strings.Contains(body, "One process. Real product surface.") {
-		t.Error("root index is missing the product landing-page headline")
+	if !strings.Contains(body, app.appName) {
+		t.Errorf("root index missing app name %q", app.appName)
 	}
 
 	favicon, err := http.Get(srv.URL + "/favicon.ico")
