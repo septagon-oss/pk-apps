@@ -24,6 +24,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/septagon-oss/pk-modules/pkg/portslib"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -116,7 +118,7 @@ func TestCrossTenantAndAnonymousAPIAccessDenied(t *testing.T) {
 
 	// (2) The IDOR: the authenticated admin knows the victim row's exact ID but
 	// belongs to a different tenant. The read must be 404 — never the row.
-	if code, body := authGet("/api/v1/content/" + victimID); code != http.StatusNotFound {
+	if code, body := authGet("/api/v1/content/" + encodeID(t, victimID)); code != http.StatusNotFound {
 		t.Fatalf("cross-tenant GET /api/v1/content/%s = %d, want 404; body=%s", victimID, code, body)
 	}
 
@@ -168,7 +170,7 @@ func TestUsersWriteAPIKeyCannotReplaceLoginPassword(t *testing.T) {
 	)
 	req, err := http.NewRequest(
 		http.MethodPut,
-		srv.URL+"/api/v1/users/"+seed.UserID,
+		srv.URL+"/api/v1/users/"+encodeID(t, seed.UserID),
 		strings.NewReader(body),
 	)
 	if err != nil {
@@ -217,4 +219,15 @@ func TestUsersWriteAPIKeyCannotReplaceLoginPassword(t *testing.T) {
 			before.DisplayName,
 		)
 	}
+}
+
+// encodeID renders an entity id as the canonical opaque path segment the API
+// requires, which is the form a client puts on the wire.
+func encodeID(t *testing.T, id string) string {
+	t.Helper()
+	segment, ok := portslib.EncodeEntityID(id)
+	if !ok {
+		t.Fatalf("encode entity id %q", id)
+	}
+	return segment
 }

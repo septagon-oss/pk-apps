@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/septagon-oss/pk-modules/pkg/portslib"
+
 	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
 )
 
@@ -219,12 +221,22 @@ func TestOpenAPISpecMatchesApp(t *testing.T) {
 		}
 		return decoded
 	}
+	// Identifiers travel in a path as one canonical opaque segment, so every
+	// URL built here encodes the way a client does. Bearer tokens are not path
+	// segments and stay raw.
+	seg := func(raw string) string {
+		segment, ok := portslib.EncodeEntityID(raw)
+		if !ok {
+			t.Fatalf("encode entity id %q", raw)
+		}
+		return segment
+	}
 	id := func(m map[string]any, key string) string {
 		v, _ := m[key].(string)
 		if v == "" {
 			t.Fatalf("fixture response missing %q: %v", key, m)
 		}
-		return v
+		return seg(v)
 	}
 
 	// --- health (open) ---
@@ -235,15 +247,15 @@ func TestOpenAPISpecMatchesApp(t *testing.T) {
 	// --- auth ---
 	login := fmt.Sprintf(`{"tenant_id":%q,"email":%q,"password":%q}`, seed.TenantID, seed.UserEmail, seed.UserPass)
 	sess2 := call("POST", "/api/v1/auth/sessions", "/api/v1/auth/sessions", login, false, 201)
-	call("GET", "/api/v1/auth/sessions/{id}", "/api/v1/auth/sessions/"+sid, "", true, 200)
+	call("GET", "/api/v1/auth/sessions/{id}", "/api/v1/auth/sessions/"+seg(sid), "", true, 200)
 	call("DELETE", "/api/v1/auth/sessions/{id}", "/api/v1/auth/sessions/"+id(sess2, "id"), "", true, 204)
 
 	// --- tenants (provisioning is a platform op: POST is always 403; a
 	// caller may only touch its own tenant, so DELETE runs last) ---
 	call("GET", "/api/v1/tenants", "/api/v1/tenants", "", true, 200)
-	call("GET", "/api/v1/tenants/{id}", "/api/v1/tenants/"+seed.TenantID, "", true, 200)
+	call("GET", "/api/v1/tenants/{id}", "/api/v1/tenants/"+seg(seed.TenantID), "", true, 200)
 	call("POST", "/api/v1/tenants", "/api/v1/tenants", `{"slug":"conf-t","name":"Conformance"}`, true, 403)
-	call("PUT", "/api/v1/tenants/{id}", "/api/v1/tenants/"+seed.TenantID, fmt.Sprintf(`{"slug":%q,"name":%q}`, seed.TenantSlug, seed.TenantName), true, 200)
+	call("PUT", "/api/v1/tenants/{id}", "/api/v1/tenants/"+seg(seed.TenantID), fmt.Sprintf(`{"slug":%q,"name":%q}`, seed.TenantSlug, seed.TenantName), true, 200)
 
 	// --- users ---
 	call("GET", "/api/v1/users", "/api/v1/users", "", true, 200)
@@ -282,7 +294,7 @@ func TestOpenAPISpecMatchesApp(t *testing.T) {
 
 	// --- tenant delete last: a caller may only delete its own tenant, and
 	// after that the walk is over ---
-	call("DELETE", "/api/v1/tenants/{id}", "/api/v1/tenants/"+seed.TenantID, "", true, 204)
+	call("DELETE", "/api/v1/tenants/{id}", "/api/v1/tenants/"+seg(seed.TenantID), "", true, 204)
 
 	// --- coverage: every spec operation must have been exercised ---
 	for op := range ops {

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/septagon-oss/pk-modules/pkg/portslib"
+
 	"github.com/septagon-oss/pk-apps/pkg/starterapp"
 )
 
@@ -86,7 +88,7 @@ func TestPollExtensionReleaseJourney(t *testing.T) {
 		t,
 		server.Client(),
 		http.MethodPost,
-		server.URL+"/api/v1/polls/"+poll.ID+"/publish",
+		server.URL+"/api/v1/polls/"+encodeID(t, poll.ID)+"/publish",
 		apiKey,
 		nil,
 	)
@@ -186,7 +188,7 @@ func TestPollExtensionReleaseJourney(t *testing.T) {
 		t,
 		server.Client(),
 		http.MethodPost,
-		server.URL+"/api/v1/polls/"+poll.ID+"/close",
+		server.URL+"/api/v1/polls/"+encodeID(t, poll.ID)+"/close",
 		apiKey,
 		nil,
 	)
@@ -354,4 +356,15 @@ func decodeResponse(t *testing.T, payload []byte, target any) {
 	if err := json.Unmarshal(payload, target); err != nil {
 		t.Fatalf("decode %s: %v", payload, err)
 	}
+}
+
+// encodeID renders an entity id as the canonical opaque path segment the API
+// requires, which is the form a client puts on the wire.
+func encodeID(t *testing.T, id string) string {
+	t.Helper()
+	segment, ok := portslib.EncodeEntityID(id)
+	if !ok {
+		t.Fatalf("encode entity id %q", id)
+	}
+	return segment
 }

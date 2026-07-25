@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/septagon-oss/pk-core/pkg/security/identity"
+	"github.com/septagon-oss/pk-modules/pkg/portslib"
 )
 
 const publicAPIPath = "/api/v1/public/polls"
@@ -53,23 +54,31 @@ func (h *Handler) RegisterPublicRoutes(mux *http.ServeMux) {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	segments := pathSegments(strings.TrimPrefix(r.URL.Path, APIPath))
-	if len(segments) == 0 {
+	// Management routes address a poll by its opaque id, so the id arrives as
+	// one canonical segment exactly as the built-in modules require. The public
+	// routes below are deliberately different: they address a poll by its
+	// human-readable slug, which is meant to be typed and shared.
+	id, action, err := portslib.EntityIDFromPath(r.URL.Path, APIPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if id == "" {
 		h.serveCollection(w, r)
 		return
 	}
-	if len(segments) == 1 {
-		h.serveItem(w, r, segments[0])
+	if action == "" {
+		h.serveItem(w, r, id)
 		return
 	}
-	if len(segments) == 2 && r.Method == http.MethodPost {
-		switch segments[1] {
+	if r.Method == http.MethodPost {
+		switch action {
 		case "publish":
-			h.transition(w, r, segments[0], StatusPublished)
+			h.transition(w, r, id, StatusPublished)
 		case "close":
-			h.transition(w, r, segments[0], StatusClosed)
+			h.transition(w, r, id, StatusClosed)
 		case "archive":
-			h.transition(w, r, segments[0], StatusArchived)
+			h.transition(w, r, id, StatusArchived)
 		default:
 			http.NotFound(w, r)
 		}

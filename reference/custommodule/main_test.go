@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/septagon-oss/pk-modules/pkg/portslib"
+
 	"github.com/septagon-oss/pk-apps/pkg/starterapp"
 	"github.com/septagon-oss/pk-core/pkg/security/identity"
 )
@@ -108,10 +110,21 @@ func TestWidgetReferenceEnforcesScopesAndServerOwnedIdentity(t *testing.T) {
 	}
 	if rec := request(
 		http.MethodGet,
-		"/api/v1/widgets/"+created.ID,
+		"/api/v1/widgets/"+encodeID(t, created.ID),
 		"",
 		widgetReadScope,
 	); rec.Code != http.StatusOK {
 		t.Fatalf("scoped read = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+// encodeID renders an entity id as the canonical opaque path segment the API
+// requires, which is the form a client puts on the wire.
+func encodeID(t *testing.T, id string) string {
+	t.Helper()
+	segment, ok := portslib.EncodeEntityID(id)
+	if !ok {
+		t.Fatalf("encode entity id %q", id)
+	}
+	return segment
 }

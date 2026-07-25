@@ -169,7 +169,11 @@ func requestActorWithScope(
 }
 
 func (h *widgetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/v1/widgets"), "/")
+	id, _, err := portslib.EntityIDFromPath(r.URL.Path, "/api/v1/widgets")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	switch {
 	case id == "" && r.Method == http.MethodGet:
 		tenant, _, ok := requestActorWithScope(w, r, widgetReadScope)
