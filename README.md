@@ -33,9 +33,18 @@ err := starterapp.Run(
 )
 ```
 
-`reference/custommodule` is the sole reference implementation of that
-extension seam. It is intentionally outside `pkg/`: it is not installed by the
-starter, not a product template, and not another supported composition.
+Two reference implementations of that extension seam live under `reference/`.
+Both are intentionally outside `pkg/`: neither is installed by the starter, a
+product template, or another supported composition.
+
+| Reference | Shows |
+|---|---|
+| `reference/custommodule` | The smallest useful shape of the seam — one tenant-scoped `widgets` resource, two scopes, routes on the shared mux. Start here. |
+| `reference/polls` | What a fully-formed domain module looks like — append-only migrations, a draft → published → closed → archived lifecycle, author ownership plus a moderator scope, an audit outbox committed atomically with each mutation, signed anonymous voter identity, per-network throttling, `/metrics` counters, and a public browser surface beside the JSON API. |
+
+A module enforces its own authorization. Whatever scopes it checks, it must also
+declare through `ModulePlugin.APIKeyScopes` — otherwise the starter will refuse
+to mint a key that could ever satisfy them.
 
 ## What `starterapp` composes
 
