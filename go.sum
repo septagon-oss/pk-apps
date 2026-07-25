@@ -16,8 +16,8 @@ github.com/septagon-oss/pk-core v0.1.0 h1:FrknTc7u6nPiG8eh5yhfH+wANWMCr3vldFnS5z
 github.com/septagon-oss/pk-core v0.1.0/go.mod h1:Bc0Vl7PxXdpAtkyNRo4fSvayYPX6VOtgC45m/k6bsJ0=
 github.com/septagon-oss/pk-design v0.2.0 h1:su0vGi2RijPbHn10QxY3QfTITbA0BgGAbDu+GbM7P/E=
 github.com/septagon-oss/pk-design v0.2.0/go.mod h1:gHPDkDfgfgEAOGeSG7mv3gtN0DyDLh7KpxsCg6onsv4=
-github.com/septagon-oss/pk-modules v0.9.0 h1:2VbfwV8dlRzGJoHuDeGcnddobDDtsnrjDaWzzCuKtjM=
-github.com/septagon-oss/pk-modules v0.9.0/go.mod h1:SqzIN22XgTfHt2yT/SLLlVS8bWwvI78RRLIJMR73V04=
+github.com/septagon-oss/pk-modules v0.10.0 h1:z9t5o/MttsqudladA4skvFu+sPbdFzpSfsQoumEuaFs=
+github.com/septagon-oss/pk-modules v0.10.0/go.mod h1:RSQxFLkvwjBTDWPP+lqdK4Fy43NKpHDNLZklZ/EYlPg=
 github.com/septagon-oss/pk-runtime v0.1.0 h1:Xbc3qksZMcwfJ3i7fD+DoFKmm8Dszbqza/oZ7sZ4n0E=
 github.com/septagon-oss/pk-runtime v0.1.0/go.mod h1:jvJKQeDUp5bo4BxXMKggWeHsEayWPgreMSNTnDHBQU0=
 github.com/septagon-oss/pk-shared v0.2.0 h1:zRtI+wMhVuuudX2o/qaS45w3jKMR5WmkQ3mJ/wTQnBQ=
@@ -32,6 +32,8 @@ github.com/tdewolff/minify/v2 v2.24.13 h1:xrcF7gKDnUszseEY9WX9mUlZII2v2Go/QAcAwR
 github.com/tdewolff/minify/v2 v2.24.13/go.mod h1:emvwoYeIl8bfAKqRU5ww95LX9Gpggpqv/naal9a8Yq0=
 github.com/tdewolff/parse/v2 v2.8.13 h1:si/8rLw5BZZTWCCiMm9A3f6x+RmqYfrkEeXCgpX5ick=
 github.com/tdewolff/parse/v2 v2.8.13/go.mod h1:XdsoSFThlVIRIajAuqz1evNY7bagZS8LBOPA3aVopwQ=
+github.com/tdewolff/test v1.0.12 h1:7F21DqIajswxuche0geHdrUZRCWE4oko4b7bcmkkrxk=
+github.com/tdewolff/test v1.0.12/go.mod h1:XPuWBzvdUzhCuxWO1ojpXsyzsA5bFoS3tO/Q3kFuTG8=
 golang.org/x/crypto v0.52.0 h1:RMs7fP2rXdep0CftQlK8Uf+kibLm7qkCcradZWYz988=
 golang.org/x/crypto v0.52.0/go.mod h1:1QgfPxDqh0T2M/elOJtp9RvuR95kVjir0e6/BvEmGbc=
 golang.org/x/mod v0.33.0 h1:tHFzIWbBifEmbwtGz65eaWyGiGZatSrT9prnU8DbVL8=

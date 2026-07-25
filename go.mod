@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/septagon-oss/pk-core v0.1.0
-	github.com/septagon-oss/pk-modules v0.9.0
+	github.com/septagon-oss/pk-modules v0.10.0
 	github.com/septagon-oss/pk-runtime v0.1.0
 	github.com/septagon-oss/pk-ui v0.1.1
 	maragu.dev/gomponents v1.3.0
@@ -19,7 +19,10 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/septagon-oss/pk-design v0.2.0 // indirect
 	github.com/septagon-oss/pk-shared v0.2.0 // indirect
+	github.com/septagon-oss/styleengine v0.1.0 // indirect
 	github.com/septagon-oss/tw v0.2.2 // indirect
+	github.com/tdewolff/minify/v2 v2.24.13 // indirect
+	github.com/tdewolff/parse/v2 v2.8.13 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	modernc.org/libc v1.72.3 // indirect
