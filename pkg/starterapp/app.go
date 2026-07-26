@@ -589,8 +589,13 @@ func (a *App) Mux() (http.Handler, error) {
 	// including the pre-auth login POST — before any handler reads it. Without
 	// it, json.Decode buffers an unbounded body (an anonymous multi-GB login
 	// body is a memory-exhaustion DoS).
+	//
+	// rejectCrossSiteMutations sits above identity resolution: a forged
+	// cross-site write is refused before any session lookup happens. It only
+	// constrains requests that rely on the ambient session cookie — anything
+	// presenting an Authorization header is untouched (see crosssite.go).
 	handler := limitRequestBody(maxRequestBodyBytes,
-		identity.Middleware(resolver)(routed))
+		rejectCrossSiteMutations(identity.Middleware(resolver)(routed)))
 	return handler, nil
 }
 

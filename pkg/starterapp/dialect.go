@@ -9,170 +9,141 @@ package starterapp
 // engine — but the starter runs a little SQL of its own during boot (the
 // bootstrap-identity ledger), and that SQL has to work on both engines.
 //
-// Four differences matter:
+// Every statement is written out per engine, deliberately. An earlier version
+// kept one SQLite spelling and rewrote it for Postgres at runtime —
+// renumbering `?` to `$N`, swapping type names, converting INSERT OR IGNORE to
+// ON CONFLICT. That is string surgery on a language with string literals and
+// comments in it, and it was wrong in three ways a probe found immediately:
 //
-//   - Placeholders. SQLite binds with `?`, Postgres with `$1..$N`. Queries in
-//     this package are written the SQLite way and rebound when the engine is
-//     Postgres, so there is exactly one spelling of each query in the source.
-//   - Catalog introspection. "Does this table exist?" is `sqlite_master` on
-//     SQLite and `information_schema.tables` on Postgres.
-//   - Timestamp columns. SQLite's `DATETIME` is Postgres's `TIMESTAMPTZ`.
-//   - Insert-if-absent. SQLite spells it `INSERT OR IGNORE`, Postgres
-//     `INSERT ... ON CONFLICT DO NOTHING`.
+//   - a `?` inside a comment consumed a placeholder number, so the real
+//     placeholders numbered past the argument count;
+//   - a blanket type-name replacement corrupted any identifier that merely
+//     contained the word (`last_datetime` became `last_TIMESTAMPTZ`);
+//   - appending ON CONFLICT DO NOTHING to a statement ending in a comment put
+//     the clause inside the comment, silently dropping the insert-if-absent
+//     semantics — a semantic change with no error.
 //
-// ADR: ADR-0017 (composition through dependency injection), ADR-0029 (file purpose declaration).
-// Convention: C-14 (every Go file declares its purpose).
+// None of those could fire on the five statements below, but they were
+// landmines for whoever added the sixth. Two explicit spellings of five short
+// statements cost less than a rewriter that has to be correct about SQL
+// lexing, and it matches how the rest of the project handles engines: an
+// adapter per engine, never a translation at runtime.
 
 import (
 	"context"
 	"database/sql"
-	"strconv"
-	"strings"
 )
 
-// boundDB wraps the shared handle with the engine's binding rules. It exposes
-// the same three methods the boot path uses, so call sites read identically to
-// the *sql.DB versions they replaced.
+// bootstrapStatements is the boot-path SQL for one engine. The ledger table
+// name is interpolated by the constructors below, never by a caller.
+type bootstrapStatements struct {
+	// selectLedger reads the recorded identity ('active' row).
+	selectLedger string
+	// createLedger creates the ledger table if absent.
+	createLedger string
+	// insertLedger records the identity, ignoring an existing row.
+	insertLedger string
+	// countTenant counts tenants with a given id (1 argument).
+	countTenant string
+	// userTenant reads the tenant owning a given user id (1 argument).
+	userTenant string
+	// tableExists counts tables with a given name (1 argument), asking
+	// whichever catalog the engine keeps.
+	tableExists string
+}
+
+func sqliteStatements() bootstrapStatements {
+	return bootstrapStatements{
+		selectLedger: `SELECT tenant_id, user_id FROM ` + bootstrapIdentityTable + ` WHERE id = 'active'`,
+		createLedger: `CREATE TABLE IF NOT EXISTS ` + bootstrapIdentityTable + ` (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL
+		)`,
+		insertLedger: `INSERT OR IGNORE INTO ` + bootstrapIdentityTable + ` (id, tenant_id, user_id) VALUES ('active', ?, ?)`,
+		countTenant:  `SELECT COUNT(*) FROM tenants WHERE id = ?`,
+		userTenant:   `SELECT tenant_id FROM users WHERE id = ?`,
+		tableExists:  `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`,
+	}
+}
+
+func postgresStatements() bootstrapStatements {
+	return bootstrapStatements{
+		selectLedger: `SELECT tenant_id, user_id FROM ` + bootstrapIdentityTable + ` WHERE id = 'active'`,
+		createLedger: `CREATE TABLE IF NOT EXISTS ` + bootstrapIdentityTable + ` (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL
+		)`,
+		insertLedger: `INSERT INTO ` + bootstrapIdentityTable + ` (id, tenant_id, user_id) VALUES ('active', $1, $2)
+			ON CONFLICT DO NOTHING`,
+		countTenant: `SELECT COUNT(*) FROM tenants WHERE id = $1`,
+		userTenant:  `SELECT tenant_id FROM users WHERE id = $1`,
+		// Scoped to the schemas on the connection's search_path, so it matches
+		// what an unqualified query would actually resolve to.
+		tableExists: `SELECT COUNT(*) FROM information_schema.tables
+			WHERE table_name = $1 AND table_schema = ANY(current_schemas(false))`,
+	}
+}
+
+// boundDB is the shared handle plus the statement set for its engine. It
+// forwards to database/sql unchanged — no statement is rewritten in flight.
 type boundDB struct {
 	db       *sql.DB
 	postgres bool
+	sql      bootstrapStatements
 }
 
 // bind returns a boundDB for the configured driver.
 func bind(db *sql.DB, driver string) boundDB {
-	return boundDB{db: db, postgres: isPostgres(driver)}
-}
-
-// adapt translates one statement written in the SQLite dialect into the
-// engine's dialect: statement-level rewrites first, then placeholders. On
-// SQLite it is the identity function, so the embedded path pays nothing.
-func adapt(query string, postgres bool) string {
-	if !postgres {
-		return query
+	if isPostgres(driver) {
+		return boundDB{db: db, postgres: true, sql: postgresStatements()}
 	}
-	// `INSERT OR IGNORE INTO t (...) VALUES (...)` becomes
-	// `INSERT INTO t (...) VALUES (...) ON CONFLICT DO NOTHING`. The clause goes
-	// at the end, so this is a prefix swap plus a suffix.
-	if idx := indexFold(query, "insert or ignore into"); idx >= 0 {
-		query = query[:idx] + "INSERT INTO" + query[idx+len("insert or ignore into"):]
-		query = strings.TrimRight(query, " \t\n") + " ON CONFLICT DO NOTHING"
-	}
-	// Column types inside CREATE TABLE. Postgres has no DATETIME.
-	query = replaceFold(query, "DATETIME", "TIMESTAMPTZ")
-	return rebindPlaceholders(query)
-}
-
-// indexFold is a case-insensitive strings.Index.
-func indexFold(s, substr string) int {
-	return strings.Index(strings.ToLower(s), strings.ToLower(substr))
-}
-
-// replaceFold replaces every case-insensitive occurrence of old with new.
-func replaceFold(s, old, new string) string {
-	var out strings.Builder
-	for {
-		i := indexFold(s, old)
-		if i < 0 {
-			out.WriteString(s)
-			return out.String()
-		}
-		out.WriteString(s[:i])
-		out.WriteString(new)
-		s = s[i+len(old):]
-	}
-}
-
-// rebind translates a statement for this connection's engine.
-func (b boundDB) rebind(query string) string { return adapt(query, b.postgres) }
-
-// rebindPlaceholders rewrites `?` placeholders as `$1..$N`. Question marks
-// inside single-quoted string literals are left alone — the boot SQL contains
-// literals such as `id = 'active'`.
-func rebindPlaceholders(query string) string {
-	if !strings.Contains(query, "?") {
-		return query
-	}
-	var (
-		out     strings.Builder
-		n       int
-		inQuote bool
-	)
-	out.Grow(len(query) + 8)
-	for i := 0; i < len(query); i++ {
-		c := query[i]
-		switch {
-		case c == '\'':
-			// Doubled '' is an escaped quote inside a literal; either way the
-			// toggle below tracks literal boundaries correctly.
-			inQuote = !inQuote
-			out.WriteByte(c)
-		case c == '?' && !inQuote:
-			n++
-			out.WriteByte('$')
-			out.WriteString(strconv.Itoa(n))
-		default:
-			out.WriteByte(c)
-		}
-	}
-	return out.String()
+	return boundDB{db: db, sql: sqliteStatements()}
 }
 
 func (b boundDB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	return b.db.QueryRowContext(ctx, b.rebind(query), args...)
+	return b.db.QueryRowContext(ctx, query, args...)
 }
 
 func (b boundDB) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	return b.db.QueryContext(ctx, b.rebind(query), args...)
+	return b.db.QueryContext(ctx, query, args...)
 }
 
 func (b boundDB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	return b.db.ExecContext(ctx, b.rebind(query), args...)
+	return b.db.ExecContext(ctx, query, args...)
 }
 
-// BeginTx starts a transaction whose statements are translated the same way.
+// BeginTx starts a transaction carrying the same statement set.
 func (b boundDB) BeginTx(ctx context.Context, opts *sql.TxOptions) (boundTx, error) {
 	tx, err := b.db.BeginTx(ctx, opts)
 	if err != nil {
 		return boundTx{}, err
 	}
-	return boundTx{tx: tx, postgres: b.postgres}, nil
+	return boundTx{tx: tx, sql: b.sql}, nil
 }
 
 // boundTx is the transaction counterpart of boundDB.
 type boundTx struct {
-	tx       *sql.Tx
-	postgres bool
+	tx  *sql.Tx
+	sql bootstrapStatements
 }
-
-func (b boundTx) rebind(query string) string { return adapt(query, b.postgres) }
 
 func (b boundTx) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	return b.tx.QueryRowContext(ctx, b.rebind(query), args...)
-}
-
-func (b boundTx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	return b.tx.QueryContext(ctx, b.rebind(query), args...)
+	return b.tx.QueryRowContext(ctx, query, args...)
 }
 
 func (b boundTx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	return b.tx.ExecContext(ctx, b.rebind(query), args...)
+	return b.tx.ExecContext(ctx, query, args...)
 }
 
 func (b boundTx) Commit() error   { return b.tx.Commit() }
 func (b boundTx) Rollback() error { return b.tx.Rollback() }
 
-// tableExists reports whether a table of that name exists, asking whichever
-// catalog the engine keeps. On Postgres the search is scoped to the schemas on
-// the connection's search_path, so it matches what an unqualified query would
-// actually resolve to.
+// tableExists reports whether a table of that name exists.
 func (b boundDB) tableExists(ctx context.Context, name string) (bool, error) {
 	var count int
-	query := `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`
-	if b.postgres {
-		query = `SELECT COUNT(*) FROM information_schema.tables
-		         WHERE table_name = ? AND table_schema = ANY(current_schemas(false))`
-	}
-	if err := b.QueryRowContext(ctx, query, name).Scan(&count); err != nil {
+	if err := b.QueryRowContext(ctx, b.sql.tableExists, name).Scan(&count); err != nil {
 		return false, err
 	}
 	return count != 0, nil

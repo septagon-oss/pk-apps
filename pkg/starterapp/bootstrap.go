@@ -15,9 +15,8 @@ package starterapp
 // ledger makes the choice explicit and permanent — resolve reads it, boot
 // records it, and the pair never drifts.
 //
-// The ledger is written in the SQLite dialect and translated for Postgres at
-// the boundDB seam (see dialect.go), so there is one spelling of each
-// statement here.
+// Every statement this file runs comes from the engine's statement set in
+// dialect.go, so nothing is rewritten in flight.
 
 import (
 	"context"
@@ -58,10 +57,8 @@ func resolveBootstrapIdentity(ctx context.Context, db boundDB) (bootstrapIdentit
 	}
 	if ledgerExists {
 		var recorded bootstrapIdentity
-		err := db.QueryRowContext(
-			ctx,
-			`SELECT tenant_id, user_id FROM `+bootstrapIdentityTable+` WHERE id = 'active'`,
-		).Scan(&recorded.TenantID, &recorded.UserID)
+		err := db.QueryRowContext(ctx, db.sql.selectLedger).
+			Scan(&recorded.TenantID, &recorded.UserID)
 		switch {
 		case err == nil:
 			if recorded.TenantID == "" || recorded.UserID == "" {
@@ -89,7 +86,7 @@ func resolveBootstrapIdentity(ctx context.Context, db boundDB) (bootstrapIdentit
 		// records the identity this boot selects.
 	}
 
-	tenantExists, err := bootstrapRowExists(ctx, db, `SELECT COUNT(*) FROM tenants WHERE id = ?`, seed.TenantID)
+	tenantExists, err := bootstrapRowExists(ctx, db, db.sql.countTenant, seed.TenantID)
 	if err != nil {
 		return bootstrapIdentity{}, fmt.Errorf("starterapp: inspect bootstrap tenant: %w", err)
 	}
@@ -124,27 +121,16 @@ func recordBootstrapIdentity(ctx context.Context, db boundDB, identity bootstrap
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS `+bootstrapIdentityTable+` (
-			id TEXT PRIMARY KEY,
-			tenant_id TEXT NOT NULL,
-			user_id TEXT NOT NULL
-		)`); err != nil {
+	if _, err := tx.ExecContext(ctx, tx.sql.createLedger); err != nil {
 		return fmt.Errorf("starterapp: create bootstrap identity ledger: %w", err)
 	}
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT OR IGNORE INTO `+bootstrapIdentityTable+` (id, tenant_id, user_id) VALUES ('active', ?, ?)`,
-		identity.TenantID, identity.UserID,
-	); err != nil {
+	if _, err := tx.ExecContext(ctx, tx.sql.insertLedger, identity.TenantID, identity.UserID); err != nil {
 		return fmt.Errorf("starterapp: record durable bootstrap identity: %w", err)
 	}
 
 	var recorded bootstrapIdentity
-	if err := tx.QueryRowContext(
-		ctx,
-		`SELECT tenant_id, user_id FROM `+bootstrapIdentityTable+` WHERE id = 'active'`,
-	).Scan(&recorded.TenantID, &recorded.UserID); err != nil {
+	if err := tx.QueryRowContext(ctx, tx.sql.selectLedger).
+		Scan(&recorded.TenantID, &recorded.UserID); err != nil {
 		return fmt.Errorf("starterapp: read durable bootstrap identity: %w", err)
 	}
 	if recorded != identity {
@@ -172,7 +158,7 @@ func bootstrapRowExists(ctx context.Context, db boundDB, query string, args ...a
 // exists at all.
 func bootstrapUserTenant(ctx context.Context, db boundDB, userID string) (string, bool, error) {
 	var tenantID string
-	err := db.QueryRowContext(ctx, `SELECT tenant_id FROM users WHERE id = ?`, userID).Scan(&tenantID)
+	err := db.QueryRowContext(ctx, db.sql.userTenant, userID).Scan(&tenantID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return "", false, nil
