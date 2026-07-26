@@ -68,10 +68,10 @@ func TestResolveSeedParamsFailsClosedOutsideDevelopment(t *testing.T) {
 	if _, err := resolveSeedParams(&Config{
 		Environment: "production",
 		Seed: SeedConfig{
-			AdminPassword: releasedBootstrapUserPassword,
+			AdminPassword: knownPublicBootstrapPassword,
 		},
-	}); err == nil || !strings.Contains(err.Error(), "retired public bootstrap password") {
-		t.Fatalf("retired seed.admin_password error = %v", err)
+	}); err == nil || !strings.Contains(err.Error(), "published in this project's history") {
+		t.Fatalf("published-password seed.admin_password error = %v", err)
 	}
 
 	for _, email := range []string{

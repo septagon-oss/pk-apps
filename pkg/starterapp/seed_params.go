@@ -50,9 +50,9 @@ func resolveSeedParams(cfg *Config) (seed.Params, error) {
 		}
 		password = seed.UserPass
 	}
-	if password == legacyBootstrapUserPassword {
+	if password == knownPublicBootstrapPassword {
 		return seed.Params{}, fmt.Errorf(
-			"starterapp: seed.admin_password must not use the retired public bootstrap password",
+			"starterapp: seed.admin_password must not use a password published in this project's history",
 		)
 	}
 	if len([]byte(password)) > user.MaxPasswordBytes {
@@ -78,3 +78,9 @@ func seedBannerCredential(cfg *Config, params seed.Params) (email, password stri
 	}
 	return params.AdminEmail, "(set via seed.admin_password)"
 }
+
+// knownPublicBootstrapPassword shipped as the built-in administrator password
+// in early releases, so it is published in this repository's git history and in
+// every copy of those tags. It is refused outright: a deployment that sets it is
+// choosing a credential an attacker can look up.
+const knownPublicBootstrapPassword = "changeme"

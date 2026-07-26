@@ -47,19 +47,13 @@ import (
 
 	"github.com/septagon-oss/pk-modules/pkg/admin"
 	"github.com/septagon-oss/pk-modules/pkg/apikey"
-	apikeysqlite "github.com/septagon-oss/pk-modules/pkg/apikey/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/audit"
-	auditsqlite "github.com/septagon-oss/pk-modules/pkg/audit/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/auth"
 	"github.com/septagon-oss/pk-modules/pkg/content"
-	contentsqlite "github.com/septagon-oss/pk-modules/pkg/content/store/sqlite"
 	healthmod "github.com/septagon-oss/pk-modules/pkg/health"
 	"github.com/septagon-oss/pk-modules/pkg/notification"
-	notificationsqlite "github.com/septagon-oss/pk-modules/pkg/notification/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/tenant"
-	tenantsqlite "github.com/septagon-oss/pk-modules/pkg/tenant/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/user"
-	usersqlite "github.com/septagon-oss/pk-modules/pkg/user/store/sqlite"
 
 	"github.com/septagon-oss/pk-runtime/pkg/host"
 
@@ -127,57 +121,54 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		driver = "sqlite"
 	}
 
-	// 0. Open ONE shared SQLite connection pool. Every data module's store is
-	//    built from this same *sql.DB so the schema each store creates at
-	//    construction is visible to all later queries and writes serialize
-	//    through a single connection (SQLite is single-writer). SetMaxOpenConns(1)
-	//    eliminates SQLITE_BUSY and cross-pool table-visibility surprises on a
-	//    fresh database. App owns this handle and closes it in Close().
-	db, err := sql.Open(driver, dsn)
+	// 0. Open ONE shared connection pool. Every data module's store is built
+	//    from this same *sql.DB so the schema each store creates at construction
+	//    is visible to all later queries.
+	//
+	//    The pool shape is engine-specific. SQLite is a single-writer embedded
+	//    engine, so SetMaxOpenConns(1) serializes all access through one
+	//    connection, eliminating SQLITE_BUSY and cross-pool table-visibility
+	//    surprises on a fresh database. Postgres is a concurrent server: pinning
+	//    it to one connection would serialize the whole application and throw
+	//    away the reason to run Postgres at all, so it keeps a real pool.
+	//    App owns this handle and closes it in Close().
+	db, err := sql.Open(resolveSQLDriver(driver), dsn)
 	if err != nil {
-		return nil, fmt.Errorf("starterapp: open sqlite: %w", err)
+		return nil, fmt.Errorf("starterapp: open %s: %w", driver, err)
 	}
-	db.SetMaxOpenConns(1)
+	if isPostgres(driver) {
+		db.SetMaxOpenConns(defaultPostgresMaxOpenConns)
+		db.SetMaxIdleConns(defaultPostgresMaxIdleConns)
+		db.SetConnMaxLifetime(defaultPostgresConnMaxLifetime)
+	} else {
+		db.SetMaxOpenConns(1)
+	}
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("starterapp: ping sqlite: %w", err)
+		return nil, fmt.Errorf("starterapp: ping %s: %w", driver, err)
 	}
 
-	// Build each module's store on the shared handle. New() runs that store's
+	// The starter's own boot SQL (the bootstrap-identity ledger) is written in
+	// the SQLite dialect and translated for Postgres at the seam (see
+	// dialect.go), so there is one spelling of each statement in the source.
+	bdb := bind(db, driver)
+
+	// Build each module's store on the shared handle, using the adapter set the
+	// driver selects (see stores.go). New() runs that store's
 	// CREATE TABLE IF NOT EXISTS, so by the time the modules are constructed
-	// every table already exists on the one connection they all share. If any
-	// store fails we close the shared handle before returning so we never leak
-	// the pool.
-	tenantStore, err := tenantsqlite.New(db)
+	// every table already exists. If any store fails we close the shared handle
+	// before returning so we never leak the pool.
+	stores, err := openModuleStores(db, driver)
 	if err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("tenant store: %w", err)
+		return nil, err
 	}
-	userStore, err := usersqlite.New(db)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("user store: %w", err)
-	}
-	auditStore, err := auditsqlite.New(db)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("audit store: %w", err)
-	}
-	apiKeyStore, err := apikeysqlite.New(db)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("api_key store: %w", err)
-	}
-	contentStore, err := contentsqlite.New(db)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("content store: %w", err)
-	}
-	notificationStore, err := notificationsqlite.New(db)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("notification store: %w", err)
-	}
+	tenantStore := stores.tenant
+	userStore := stores.user
+	auditStore := stores.audit
+	apiKeyStore := stores.apiKey
+	contentStore := stores.content
+	notificationStore := stores.notification
 
 	// closeOnErr closes the shared DB if module construction below fails, so a
 	// partial boot does not leak the pool. Cleared once the App takes ownership.
@@ -192,12 +183,7 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	bootstrapIDs, err := resolveBootstrapIdentity(
-		ctx,
-		db,
-		seedParams.AdminEmail,
-		cfg.Seed.AdminEmail != "",
-	)
+	bootstrapIDs, err := resolveBootstrapIdentity(ctx, bdb)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +249,7 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 
 	// 6. Auth_management — requires user_management's UserBoundaryReader.
 	authMod, err := auth.NewModule(
-		auth.WithSQLiteDB(db),
+		auth.WithStore(stores.authSession),
 		auth.WithUserReader(userMod.Service()),
 		auth.WithLoginPolicy(newLoginAttemptPolicy()),
 		auth.WithAuditEmitter(auditEmitter),
@@ -298,14 +284,7 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		return nil, fmt.Errorf("notification module: %w", err)
 	}
 
-	if err := migrateBootstrapIdentity(
-		ctx,
-		db,
-		userMod.Hasher(),
-		seedParams.AdminEmail,
-		seedParams.AdminPassword,
-		bootstrapIDs,
-	); err != nil {
+	if err := recordBootstrapIdentity(ctx, bdb, bootstrapIDs); err != nil {
 		return nil, err
 	}
 
