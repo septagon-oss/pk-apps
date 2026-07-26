@@ -14,7 +14,6 @@
 package starterapp
 
 import (
-	"html/template"
 	"net/http"
 	"strings"
 
@@ -27,17 +26,6 @@ const (
 	adminLoginPath  = "/admin/login"
 	adminLogoutPath = "/admin/logout"
 )
-
-var adminForbiddenTemplate = template.Must(template.New("admin-forbidden").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Access required · PlatformKit</title>
-<style>
-*{box-sizing:border-box}body{min-height:100vh;margin:0;display:grid;place-items:center;padding:24px;color:#eff4e9;background:#12201d;font-family:"IBM Plex Sans",Aptos,sans-serif}
-main{width:min(100%,620px);padding:clamp(28px,7vw,64px);border:1px solid rgba(255,255,255,.22)}
-p:first-child{margin:0 0 18px;color:#d8f35d;font:700 11px/1.3 "IBM Plex Mono",monospace;letter-spacing:.14em;text-transform:uppercase}
-h1{max-width:9ch;margin:0;font:500 clamp(42px,9vw,76px)/.95 "Iowan Old Style",Georgia,serif;letter-spacing:-.04em}
-p{max-width:48ch;color:#b8c3bc;line-height:1.6}a{min-height:44px;display:inline-flex;align-items:center;margin-top:14px;padding:0 16px;color:#12201d;background:#d8f35d;font-weight:800;text-decoration:none}:focus-visible{outline:3px solid #8ab4ff;outline-offset:4px}
-</style></head><body><main><p>403 / insufficient scope</p><h1>This console needs an administrator.</h1><p>You are signed in, but this account does not carry both <code>admin</code> and <code>console:access</code>. Ask a workspace administrator to grant access or sign in with a different account.</p><a href="/admin/login">Return to sign in</a></main></body></html>`))
 
 // guardAdmin requires explicit interactive-console capabilities. Anonymous
 // callers are redirected to sign in; authenticated callers without both
@@ -132,8 +120,13 @@ func renderAdminForbidden(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	page, err := renderForbiddenView()
+	if err != nil {
+		http.Error(w, "insufficient scope", http.StatusForbidden)
+		return
+	}
 	w.WriteHeader(http.StatusForbidden)
-	_ = adminForbiddenTemplate.Execute(w, nil)
+	_, _ = w.Write(page)
 }
 
 func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {

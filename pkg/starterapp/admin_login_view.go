@@ -4,22 +4,22 @@
 
 package starterapp
 
-// admin_login_view.go renders the sign-in page as a typed gomponents view on
-// the design system, completing the console's template retirement. The page
-// stays fully self-contained — one inline <style>, no external stylesheet,
-// no script — because it is served to anonymous visitors under a CSP of
-// `default-src 'none'; style-src 'unsafe-inline'`, and that property is the
-// point. Inside that one stylesheet the console's line holds:
+// admin_login_view.go renders the sign-in page as a typed gomponents view
+// composed ONLY of pk-ui components — Input, Alert, Button — plus the page's
+// voice. It stays fully self-contained (one inline <style>, no external
+// stylesheet, no script) because it serves anonymous visitors under a CSP of
+// `default-src 'none'; style-src 'unsafe-inline'`, and that containment is
+// the point. Inside that one stylesheet the console's line holds:
 //
-//   - Tokens are generated from themes.Default() via tokens.CSSVars — the
-//     hand-copied hex palette this file used to carry is gone; retheming the
-//     design system rethemes the login.
-//   - Components — the labeled inputs, the error notice, the development
-//     callout, the footnote — are tw class lists, with their rules emitted
-//     by emission.For into the same inline sheet.
-//   - Voice — the dark story panel, the brand mark, the serif hero, the
-//     signal-lime call to action — is bespoke CSS aliased onto --pk-*
-//     custom properties, product chrome per ADR-0022, not a component.
+//   - Tokens are generated from themes.Default() via tokens.CSSVars.
+//   - Component rules are emitted from pk-ui's own class registry
+//     (emission.For(web.ClassLists()...)), so the controls here are the
+//     same implementation the admin console renders.
+//   - Voice — the dark story panel, brand mark, serif hero — is bespoke CSS
+//     aliased onto --pk-* custom properties (ADR-0022). The signal-lime call
+//     to action is a REAL pk-ui Button whose color roles are re-mapped in a
+//     page-scoped rule (.cta-signal): the role indirection the design system
+//     exists for, not a competing button implementation.
 
 import (
 	"bytes"
@@ -30,56 +30,19 @@ import (
 
 	"github.com/septagon-oss/pk-design/pkg/themes"
 	"github.com/septagon-oss/pk-design/pkg/tokens"
+	"github.com/septagon-oss/pk-ui/contracts"
+	"github.com/septagon-oss/pk-ui/contracts/atoms"
+	"github.com/septagon-oss/pk-ui/render/web"
 	"github.com/septagon-oss/styleengine"
-	"github.com/septagon-oss/tw"
 	"github.com/septagon-oss/tw/emission"
 )
 
-// loginClasses are the component styles the sign-in panel composes. Their
-// rules reach the inline stylesheet through loginUtilityCSS, so a class
-// declared here is styled by construction.
-var loginClasses = struct {
-	Notice    tw.ClassList
-	DevNote   tw.ClassList
-	DevTitle  tw.ClassList
-	Code      tw.ClassList
-	Field     tw.ClassList
-	LabelRow  tw.ClassList
-	LabelHint tw.ClassList
-	Input     tw.ClassList
-	Secure    tw.ClassList
-}{
-	Notice: tw.New().MarginBottom(tw.S5).PaddingX(tw.S3_5).PaddingY(tw.S3).
-		BorderLeft(tw.Border4).BorderLeftColor(tw.BorderDanger).
-		Bg(tw.SurfaceDangerSoft).TextColor(tw.FgDanger).FontSize(tw.TextSM),
-	DevNote: tw.New().MarginBottom(tw.S5).PaddingX(tw.S4).PaddingY(tw.S3).
-		Border(tw.Border1).BorderColor(tw.BorderBrand).Rounded(tw.RadiusSM).
-		Bg(tw.SurfaceBrandSoft).TextColor(tw.FgSecondary).FontSize(tw.TextXS),
-	DevTitle: tw.New().Display(tw.DisplayBlock).MarginBottom(tw.S1).
-		FontWeight(tw.FontSemibold).TextColor(tw.FgPrimary),
-	Code:  tw.New().FontFamily(tw.FontMono),
-	Field: tw.New().MarginTop(tw.S5),
-	LabelRow: tw.New().Display(tw.DisplayFlex).Items(tw.ItemsBaseline).
-		Justify(tw.JustifyBetween).Gap(tw.S3).MarginBottom(tw.S1_5).
-		FontSize(tw.TextXS).FontWeight(tw.FontBold).TextColor(tw.FgPrimary),
-	LabelHint: tw.New().TextColor(tw.FgMuted).FontFamily(tw.FontMono).
-		FontWeight(tw.FontNormal),
-	Input: tw.New().Display(tw.DisplayBlock).Width(tw.SFull).MinHeight(tw.S12).
-		PaddingX(tw.S3).PaddingY(tw.S2_5).
-		Rounded(tw.RadiusSM).Border(tw.Border1).BorderColor(tw.BorderPrimary).
-		Bg(tw.SurfacePrimary).TextColor(tw.FgPrimary).
-		On(tw.StateHover, func(c tw.ClassList) tw.ClassList { return c.BorderColor(tw.BorderSecondary) }).
-		On(tw.StatePlaceholder, func(c tw.ClassList) tw.ClassList { return c.TextColor(tw.FgPlaceholder) }),
-	Secure: tw.New().MarginTop(tw.S4).TextAlign(tw.TextCenter).
-		FontSize(tw.TextXS).TextColor(tw.FgMuted),
-}
-
-// loginVoiceCSS is the page's art direction: the dark story panel, the brand
-// mark, the editorial hero, and the signal-lime call to action. It reads its
-// colors and type through the same --pk-* custom properties the generated
-// token block defines, so it follows the theme without being a component.
-// The `min-width: 320px` floor and reduced-motion guard are part of the
-// accessibility contract pinned by the security hardening tests.
+// loginVoiceCSS is the page's art direction, reading its colors and type
+// through the generated --pk-* custom properties. The `min-width: 320px`
+// floor and reduced-motion guard are part of the accessibility contract
+// pinned by the security hardening tests. `.cta-signal` re-maps the brand
+// color roles to the login's signal lime for the one component scoped
+// inside it — retheming by role indirection, per ADR-0022.
 const loginVoiceCSS = `
   :root {
     --ink: var(--pk-color-text-primary);
@@ -104,6 +67,13 @@ const loginVoiceCSS = `
   }
   button, input { font: inherit; }
   :focus-visible { outline: 3px solid #326de6; outline-offset: 3px; }
+  .cta-signal {
+    --pk-role-surface-brand: var(--pk-color-signal);
+    --pk-role-surface-brand-hover: #e5fa82;
+    --pk-role-fg-on-brand: var(--pk-color-sidebar-bg);
+    min-height: 50px;
+    margin-top: 26px;
+  }
   .skip {
     position: fixed;
     z-index: 10;
@@ -212,20 +182,9 @@ const loginVoiceCSS = `
     line-height: 1;
   }
   .sub { margin: 13px 0 0; color: var(--muted); font-size: 14px; }
-  .cta {
-    width: 100%;
-    min-height: 50px;
-    margin-top: 26px;
-    padding: 10px 18px;
-    color: var(--field);
-    background: var(--signal);
-    border: 1px solid #aabe45;
-    border-radius: 3px;
-    font-weight: 800;
-    cursor: pointer;
-    transition: transform 160ms cubic-bezier(.22,1,.36,1), background-color 160ms ease;
-  }
-  .cta:hover { background: #e5fa82; transform: translateY(-1px); }
+  .panel-gap { margin-bottom: 22px; }
+  .field-gap { margin-top: 19px; }
+  .secure { margin-top: 18px; text-align: center; }
   @media (max-width: 820px) {
     .shell { grid-template-columns: 1fr; }
     .story { min-height: auto; padding: 24px; gap: 34px; }
@@ -243,34 +202,32 @@ const loginVoiceCSS = `
   }
 `
 
-// loginStylesheet assembles the page's one inline <style>: generated theme
-// tokens, then role vars plus the rules for exactly the class lists above,
-// then the voice. Computed once; the inputs are compile-time constants, so
-// on error the voice CSS still ships and the page degrades to unstyled
-// components rather than failing the login flow.
-var loginStylesheet = sync.OnceValue(func() string {
+// inlineBaseCSS assembles the shared self-contained core for anonymous
+// pages: generated theme tokens, role variables, and the rules for pk-ui's
+// entire class registry — so any pk-ui component composes correctly with no
+// external stylesheet. Computed once; the inputs are compile-time constants,
+// so on error the voice still ships and controls degrade to unstyled rather
+// than failing the flow.
+var inlineBaseCSS = sync.OnceValue(func() string {
 	tokenCSS, err := tokens.CSSVars(themes.Default().Tokens)
 	if err != nil {
 		tokenCSS = ":root {}\n"
 	}
-	utility, err := emission.For(
-		loginClasses.Notice, loginClasses.DevNote, loginClasses.DevTitle,
-		loginClasses.Code, loginClasses.Field, loginClasses.LabelRow,
-		loginClasses.LabelHint, loginClasses.Input, loginClasses.Secure,
-	)
 	utilityCSS := ""
-	if err == nil {
+	if utility, err := emission.For(web.ClassLists()...); err == nil {
 		if rendered, rerr := emission.RoleVars().Merge(utility).Render(styleengine.RenderOptions{Minify: true}); rerr == nil {
 			utilityCSS = rendered
 		}
 	}
-	return tokenCSS + utilityCSS + loginVoiceCSS
+	return tokenCSS + utilityCSS
 })
 
+func loginStylesheet() string { return inlineBaseCSS() + loginVoiceCSS }
+
 // loginView renders the full sign-in document. The DOM contract the tests
-// and browsers rely on carries over from the retired template: field ids and
-// names, autocomplete hints, the required/autofocus pair on the tenant
-// field, the alert notice, and the skip link.
+// and browsers rely on carries over: field ids and names, autocomplete
+// hints, maxlength caps, the required/autofocus pair on the tenant field,
+// the role=alert notice, and the skip link.
 func loginView(v adminLoginView) g.Node {
 	return h.Doctype(h.HTML(h.Lang("en"),
 		h.Head(
@@ -305,36 +262,45 @@ func loginView(v adminLoginView) g.Node {
 							h.P(h.Class("sub"), g.Text("Sign in with an administrator account for this tenant.")),
 						),
 						g.If(v.Error != "",
-							h.Div(h.Class(loginClasses.Notice.Compile()), h.Role("alert"),
-								g.Attr("aria-live", "assertive"), g.Text(v.Error)),
+							h.Div(h.Class("panel-gap"), web.Alert(atoms.AlertProps{
+								Variant: "error",
+								Message: v.Error,
+							})),
 						),
 						g.If(v.Development,
-							h.Aside(h.Class(loginClasses.DevNote.Compile()),
-								h.Strong(h.Class(loginClasses.DevTitle.Compile()), g.Text("Development workspace")),
-								g.Text("Tenant "), h.Code(h.Class(loginClasses.Code.Compile()), g.Text(v.BootstrapTenant)),
-								g.Text(" and email "), h.Code(h.Class(loginClasses.Code.Compile()), g.Text(v.BootstrapEmail)),
-								g.Text(" are prefilled. Use the local password printed in the terminal."),
-							),
+							h.Div(h.Class("panel-gap"), web.Alert(atoms.AlertProps{
+								Variant: "success",
+								Title:   "Development workspace",
+								Message: "Tenant " + v.BootstrapTenant + " and email " + v.BootstrapEmail +
+									" are prefilled. Use the local password printed in the terminal.",
+							})),
 						),
 						h.Form(h.Method("post"), h.Action(adminLoginPath),
-							loginField("tenant_id", "Tenant ID",
-								h.Input(h.Class(loginClasses.Input.Compile()), h.ID("tenant_id"), h.Name("tenant_id"),
-									h.Value(v.TenantID), h.AutoComplete("organization"), h.MaxLength("128"),
-									h.Required(), h.AutoFocus()),
-							),
-							loginField("email", "Email",
-								h.Input(h.Class(loginClasses.Input.Compile()), h.ID("email"), h.Name("email"),
-									h.Value(v.Email), h.Type("email"), h.AutoComplete("username"), h.MaxLength("320"),
-									h.Required()),
-							),
-							loginField("password", "Password",
-								h.Input(h.Class(loginClasses.Input.Compile()), h.ID("password"), h.Name("password"),
-									h.Type("password"), h.AutoComplete("current-password"), h.MaxLength("1024"),
-									h.Required()),
-							),
-							h.Button(h.Class("cta"), h.Type("submit"), g.Text("Enter operator workspace")),
+							h.Div(h.Class("field-gap"), web.Input(atoms.InputProps{
+								ComponentProps: contracts.ComponentProps{ID: "tenant_id",
+									Attrs: map[string]string{"autocomplete": "organization", "maxlength": "128"}},
+								Name: "tenant_id", Label: "Tenant ID",
+								Value: v.TenantID, Required: true, AutoFocus: true,
+							})),
+							h.Div(h.Class("field-gap"), web.Input(atoms.InputProps{
+								ComponentProps: contracts.ComponentProps{ID: "email",
+									Attrs: map[string]string{"autocomplete": "username", "maxlength": "320"}},
+								Name: "email", Type: "email", Label: "Email",
+								Value: v.Email, Required: true,
+							})),
+							h.Div(h.Class("field-gap"), web.Input(atoms.InputProps{
+								ComponentProps: contracts.ComponentProps{ID: "password",
+									Attrs: map[string]string{"autocomplete": "current-password", "maxlength": "1024"}},
+								Name: "password", Type: "password", Label: "Password",
+								Required: true,
+							})),
+							web.Button(atoms.ButtonProps{
+								ComponentProps: contracts.ComponentProps{Class: "cta-signal"},
+								Text:           "Enter operator workspace",
+								Variant:        "primary", Size: "large", Type: "submit", FullWidth: true,
+							}),
 						),
-						h.P(h.Class(loginClasses.Secure.Compile()),
+						h.P(h.Class(web.TextClasses("muted", "xs", "").Compile()+" secure"),
 							g.Text("Session cookies are HttpOnly and tenant-scoped requests remain isolated.")),
 					),
 				),
@@ -343,20 +309,8 @@ func loginView(v adminLoginView) g.Node {
 	))
 }
 
-// loginField wraps one labeled control in the shared field layout, keeping
-// the visible "required" hint the retired template showed for every field.
-func loginField(id, label string, control g.Node) g.Node {
-	return h.Div(h.Class(loginClasses.Field.Compile()),
-		h.Label(h.Class(loginClasses.LabelRow.Compile()), h.For(id),
-			g.Text(label),
-			h.Span(h.Class(loginClasses.LabelHint.Compile()), g.Text("required")),
-		),
-		control,
-	)
-}
-
 // renderLoginView buffers the view so a render failure can never emit a
-// half-written document after the status line (C-10 spirit for handlers).
+// half-written document after the status line.
 func renderLoginView(v adminLoginView) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := loginView(v).Render(&buf); err != nil {
