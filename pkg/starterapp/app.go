@@ -158,6 +158,19 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	// CREATE TABLE IF NOT EXISTS, so by the time the modules are constructed
 	// every table already exists. If any store fails we close the shared handle
 	// before returning so we never leak the pool.
+	// Serialize schema creation across processes for the whole boot. CREATE
+	// TABLE IF NOT EXISTS is not concurrency-safe on Postgres: simultaneous
+	// replicas race the system catalog and most fail to start. Schema is created
+	// in three places below — the built-in stores, the bootstrap ledger, and any
+	// contributed module — so the lock spans them all rather than one call
+	// (see schemalock.go). Released when BuildApp returns.
+	releaseSchemaLock, err := acquireSchemaLock(ctx, db, isPostgres(driver))
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	defer releaseSchemaLock()
+
 	stores, err := openModuleStores(db, driver)
 	if err != nil {
 		_ = db.Close()
