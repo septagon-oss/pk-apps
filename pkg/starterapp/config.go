@@ -7,7 +7,7 @@
 //
 // We use a hand-written line-oriented parser instead of importing a YAML
 // dependency. The config schema is intentionally narrow: a handful of strings
-// and durations under three sections (http, database, cache) plus three
+// and durations under four sections (http, database, cache, seed) plus three
 // top-level fields. The parser is tolerant of comments, blank lines, and
 // trailing whitespace and rejects unknown keys to keep typos loud.
 //
@@ -75,8 +75,11 @@ type SeedConfig struct {
 // on later boots — deliberately unlike the development demo password (which
 // dev mode repairs on every boot): an operator's UI edits to branding must
 // survive restarts in every environment, so config is only the cold-start
-// default. A non-empty DisplayName is what arms the seed; the other fields
-// ride along with it.
+// default. A non-empty DisplayName is what arms the seed; ride-along fields
+// without it fail boot rather than silently no-oping. A LogoPath that is
+// missing or unreadable also FAILS BOOT — though only when the seed actually
+// runs (a bare tenant), so a path that goes stale once a record exists is not
+// noticed until the next fresh database.
 type BrandingSeedConfig struct {
 	DisplayName  string
 	PrimaryColor string

@@ -459,9 +459,20 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 // the cold-start default. Save validates every field and stamps the tenant's
 // setup as complete, which is what lets a seeded deployment bypass the
 // first-login setup gate entirely.
+//
+// Failure modes are loud: ride-along keys (color, font, logo path) without
+// branding_display_name refuse to boot, and a missing or unreadable
+// branding_logo_path FAILS BOOT too — but note the logo read only happens
+// against a bare tenant, so a path that has gone stale after the record
+// exists lurks in config unnoticed until the next fresh database.
 func seedBranding(ctx context.Context, cfg *Config, brandingMod *branding.Module) error {
 	b := cfg.Seed.Branding
 	if b.DisplayName == "" {
+		// Loud config: partial branding seed keys are a mistake, not a no-op.
+		if b.PrimaryColor != "" || b.FontKey != "" || b.LogoPath != "" {
+			return fmt.Errorf(
+				"starterapp: seed.branding_display_name is required when other branding seed keys are set")
+		}
 		return nil
 	}
 	if _, err := brandingMod.Store().Get(ctx, seed.TenantID); err == nil {

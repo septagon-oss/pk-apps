@@ -74,6 +74,35 @@ func TestLoadConfigBrandingSeedKeys(t *testing.T) {
 	}
 }
 
+// TestBrandingSeedRequiresDisplayName proves the loud-config rule: ride-along
+// branding seed keys (color, font, logo path) WITHOUT branding_display_name
+// fail boot with a clear error instead of silently seeding nothing.
+func TestBrandingSeedRequiresDisplayName(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]BrandingSeedConfig{
+		"color only": {PrimaryColor: "#14b8a6"},
+		"font only":  {FontKey: "plex"},
+		"logo only":  {LogoPath: "./logo.png"},
+	}
+	for name, seedCfg := range cases {
+		cfg := DefaultConfig()
+		cfg.Database.DSN = fmt.Sprintf("file:%s?cache=shared&mode=rwc",
+			filepath.Join(t.TempDir(), "pk.db"))
+		cfg.HTTP.Addr = ":0"
+		cfg.Seed.Branding = seedCfg
+
+		app, err := BuildApp(context.Background(), cfg)
+		if err == nil {
+			app.Close()
+			t.Fatalf("%s: BuildApp accepted branding seed keys without a display name", name)
+		}
+		if !strings.Contains(err.Error(), "branding_display_name") {
+			t.Fatalf("%s: error %q does not name seed.branding_display_name", name, err)
+		}
+	}
+}
+
 // brandingTestClient wraps the browser-shaped requests the branding E2E flow
 // needs: form login capturing the session cookie, cookie-carrying GETs, and a
 // same-origin multipart POST — all with redirects surfaced, never followed,
@@ -202,7 +231,7 @@ func TestBrandingFirstLoginSetupFlow(t *testing.T) {
 	cfg.Database.DSN = fmt.Sprintf("file:%s?cache=shared&mode=rwc", dbPath)
 	cfg.HTTP.Addr = ":0"
 
-	_, srv := bootBrandingApp(t, cfg)
+	app, srv := bootBrandingApp(t, cfg)
 	c := newBrandingClient(t, srv)
 
 	// The pre-auth login page carries cfg.AppName, not a hardcoded product
@@ -261,7 +290,14 @@ func TestBrandingFirstLoginSetupFlow(t *testing.T) {
 		t.Fatalf("_branding.css missing --pk-color-accent-default; body:\n%s", css)
 	}
 
-	// REBOOT against the same database: the gate must never re-fire.
+	// REBOOT against the same database: the gate must never re-fire. Real
+	// restart semantics — the first instance is fully shut down (server, then
+	// the shared *sql.DB) before the second boots on the same file, so this
+	// cannot lean on shared-cache visibility between two live handles.
+	srv.Close()
+	if err := app.Close(); err != nil {
+		t.Fatalf("close first app: %v", err)
+	}
 	_, srv2 := bootBrandingApp(t, cfg)
 	c2 := newBrandingClient(t, srv2)
 	c2.login()
@@ -299,7 +335,7 @@ func TestBrandingSeededBootBypassesGate(t *testing.T) {
 		LogoPath:     logoPath,
 	}
 
-	_, srv := bootBrandingApp(t, cfg)
+	app, srv := bootBrandingApp(t, cfg)
 	c := newBrandingClient(t, srv)
 	c.login()
 
@@ -325,6 +361,11 @@ func TestBrandingSeededBootBypassesGate(t *testing.T) {
 		"color_mode":   "default",
 	}); code != http.StatusSeeOther {
 		t.Fatalf("edit save = %d, want 303", code)
+	}
+	// Full restart (server + DB handle closed) before the second boot.
+	srv.Close()
+	if err := app.Close(); err != nil {
+		t.Fatalf("close first app: %v", err)
 	}
 	_, srv2 := bootBrandingApp(t, cfg)
 	c2 := newBrandingClient(t, srv2)
@@ -364,7 +405,11 @@ func TestBrandingSkipClosesGate(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("GET /admin after skip = %d, want 200 (gate open?)", code)
 	}
-	if !strings.Contains(body, "Workspace") {
-		t.Fatalf("post-skip admin home missing fallback workspace name; body:\n%s", body)
+	// Exact-match the chrome title: Skip records the handler's "Workspace"
+	// fallback as the display name, which replaces the shell title. A bare
+	// substring check would false-pass on the unbranded chrome's "Workspace"
+	// sidebar section label.
+	if want := "<title>Overview · Workspace</title>"; !strings.Contains(body, want) {
+		t.Fatalf("post-skip admin home missing exact fallback title %q; body:\n%s", want, body)
 	}
 }

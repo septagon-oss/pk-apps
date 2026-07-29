@@ -20,10 +20,11 @@ modules, client overlays, staging state, or hosted deployment automation.
 
 The canonical "first-run" path for PlatformKit OSS v0.1.0 is the
 **Starter SaaS** monolith at `apps/starter-saas`. One Go binary, one
-SQLite file, and all nine OSS modules — `tenant_management`,
+SQLite file, and all ten OSS modules — `tenant_management`,
 `user_management`, `auth_management`, `api_key_management`,
 `content_management`, `notification_management`, `audit_management`,
-`health_management`, and `admin_management` — composed end-to-end.
+`health_management`, `branding_management`, and `admin_management` —
+composed end-to-end.
 
 ### Quickstart
 

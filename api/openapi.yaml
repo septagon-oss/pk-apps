@@ -40,6 +40,7 @@ tags:
   - name: audit
   - name: content
   - name: notifications
+  - name: branding
   - name: health
 
 security:
@@ -510,6 +511,75 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /api/v1/branding:
+    get:
+      tags: [branding]
+      summary: Read the caller tenant's branding profile
+      description: |
+        Resolves to a zero profile (`setup_complete: false`, empty fields)
+        when the tenant has never saved or skipped branding setup. `logo_url`
+        is a servable route (never raw bytes) and is empty when no logo is on
+        record.
+      operationId: getBranding
+      responses:
+        '200':
+          description: The resolved branding profile.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BrandingProfile' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [branding]
+      summary: Save or skip branding setup (multipart form)
+      description: |
+        The admin branding page's form endpoint — redirect-based, not JSON.
+        `action=save` persists display name, palette, font, and the optional
+        logo upload (`primary_color` is honored only when
+        `color_mode=custom`; omitting the logo part keeps the current logo).
+        `action=skip` records an explicit skip using the submitted (or
+        fallback) display name. Both respond `303` back to the admin branding
+        page — `?saved=1` on success, `?error=<message>` on a failed save. A
+        cross-origin `Origin` header responds `403`; an unrecognized
+        `action` (impossible from the rendered form) responds `400`.
+      operationId: postBranding
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/BrandingForm' }
+      responses:
+        '303':
+          description: Redirect to the admin branding page (`?saved=1` or `?error=<message>`).
+          headers:
+            Location:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Cross-origin form post rejected.
+          content: { text/plain: { schema: { type: string } } }
+
+  /api/v1/branding/logo:
+    get:
+      tags: [branding]
+      summary: Serve the caller tenant's logo bytes
+      description: |
+        The raw logo with its stored content type. Served with `nosniff`, a
+        deny-all `Content-Security-Policy`, `Referrer-Policy: no-referrer`,
+        and a short private cache — the body is tenant-supplied content.
+        Responds `404` when the tenant has no branding record or no logo.
+      operationId: getBrandingLogo
+      responses:
+        '200':
+          description: The logo image (PNG, JPEG, WebP, or SVG).
+          content:
+            image/png: { schema: { type: string, format: binary } }
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+            image/svg+xml: { schema: { type: string, format: binary } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /healthz:
     get:
       tags: [health]
@@ -744,3 +814,32 @@ components:
       properties:
         category: { type: string }
         channel: { type: string, example: in_app }
+
+    BrandingProfile:
+      type: object
+      properties:
+        tenant_id: { type: string }
+        display_name: { type: string }
+        logo_url: { type: string, description: Servable logo route with a cache-busting query; empty when no logo is on record. }
+        logo_alt: { type: string }
+        primary_color: { type: string, example: '#14b8a6' }
+        font_key: { type: string, enum: ['', editorial, grotesk, plex] }
+        setup_complete: { type: boolean }
+
+    BrandingForm:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [save, skip] }
+        display_name: { type: string, maxLength: 120, description: Required for save; skip falls back to "Workspace" when empty. }
+        color_mode:
+          type: string
+          enum: [default, custom]
+          description: '`primary_color` is honored only when `custom`; any other value clears the palette to the theme default.'
+        primary_color: { type: string, example: '#14b8a6' }
+        font_key: { type: string, enum: ['', editorial, grotesk, plex] }
+        logo_alt: { type: string, maxLength: 120 }
+        logo:
+          type: string
+          format: binary
+          description: PNG, JPEG, WebP, or SVG up to 1 MiB; omit to keep the current logo.

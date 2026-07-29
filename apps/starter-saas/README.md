@@ -1,10 +1,10 @@
 # starter-saas
 
 The runnable PlatformKit OSS monolith. One Go binary, one SQLite file, and
-nine composed modules: `tenant_management`, `user_management`,
+ten composed modules: `tenant_management`, `user_management`,
 `audit_management`, `health_management`, `auth_management`,
-`api_key_management`, `content_management`, `notification_management`, and
-`admin_management`.
+`api_key_management`, `content_management`, `notification_management`,
+`branding_management`, and `admin_management`.
 
 ## Quickstart
 

@@ -13,9 +13,11 @@ package starterapp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -202,6 +204,53 @@ func TestOpenAPISpecMatchesApp(t *testing.T) {
 	call("POST", "/api/v1/notifications/{id}/read", "/api/v1/notifications/"+id(n, "id")+"/read", "", true, 204)
 	s := call("POST", "/api/v1/notification-subscriptions", "/api/v1/notification-subscriptions", `{"channel":"in_app","category":"system"}`, true, 201)
 	call("DELETE", "/api/v1/notification-subscriptions/{id}", "/api/v1/notification-subscriptions/"+id(s, "id"), "", true, 204)
+
+	// --- branding (JSON profile read + redirect-based multipart form) ---
+	call("GET", "/api/v1/branding", "/api/v1/branding", "", true, 200)
+	// No logo has been uploaded for the seed tenant, so the logo route 404s.
+	call("GET", "/api/v1/branding/logo", "/api/v1/branding/logo", "", true, 404)
+	// POST /api/v1/branding is the one non-JSON operation: a multipart form
+	// answered with a 303 redirect, so it needs a bespoke call — multipart
+	// body, and a client that surfaces the redirect instead of following it.
+	{
+		op := "POST /api/v1/branding"
+		declared, ok := ops[op]
+		if !ok {
+			t.Fatalf("app exercises %s but the spec does not declare it", op)
+		}
+		if !declared["303"] {
+			t.Fatalf("%s: test expects 303 but the spec does not declare that status (declares %v)", op, declared)
+		}
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		for k, v := range map[string]string{
+			"action":       "save",
+			"display_name": "Conformance Inc",
+			"color_mode":   "default",
+		} {
+			if err := mw.WriteField(k, v); err != nil {
+				t.Fatalf("write branding field %s: %v", k, err)
+			}
+		}
+		if err := mw.Close(); err != nil {
+			t.Fatalf("close branding multipart: %v", err)
+		}
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/branding", &buf)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.Header.Set("Authorization", "Bearer "+sid)
+		noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}}
+		resp, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatalf("POST /api/v1/branding: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusSeeOther {
+			t.Fatalf("POST /api/v1/branding = %d, want 303 (spec op %s)", resp.StatusCode, op)
+		}
+		covered[op] = true
+	}
 
 	// --- tenant delete last: a caller may only delete its own tenant, and
 	// after that the walk is over ---
