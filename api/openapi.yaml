@@ -1,4 +1,4 @@
-# OpenAPI description of the PlatformKit OSS starter API (the nine-module
+# OpenAPI description of the PlatformKit OSS starter API (the ten-module
 # monolith served by pk-apps/pkg/starterapp and the platformkit front door).
 #
 # This file is hand-authored against the handler code in pk-modules/pkg and is
@@ -10,7 +10,7 @@ info:
   title: PlatformKit OSS API
   version: 0.2.2
   description: |
-    The HTTP API of the PlatformKit OSS starter (nine modules, multi-tenant,
+    The HTTP API of the PlatformKit OSS starter (ten modules, multi-tenant,
     SQLite-backed).
 
     **Authentication.** Every `/api/v1/*` endpoint requires authentication

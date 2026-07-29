@@ -58,13 +58,30 @@ type CacheConfig struct {
 	Provider string
 }
 
-// SeedConfig models the seed: block — the first-boot admin credentials. In a
-// development environment these default to the demo login when unset. Outside
-// development, admin_password is REQUIRED (BuildApp refuses to boot without it)
-// so the starter never ships a hardcoded, re-asserted default password.
+// SeedConfig models the seed: block — the first-boot admin credentials plus
+// the optional first-boot branding profile. In a development environment the
+// credentials default to the demo login when unset. Outside development,
+// admin_password is REQUIRED (BuildApp refuses to boot without it) so the
+// starter never ships a hardcoded, re-asserted default password.
 type SeedConfig struct {
 	AdminEmail    string
 	AdminPassword string
+	Branding      BrandingSeedConfig
+}
+
+// BrandingSeedConfig models the flat branding_* keys under seed: — the
+// optional first-boot branding profile for the seeded tenant. It is applied
+// ONLY when the tenant has no branding record at all and is never re-asserted
+// on later boots — deliberately unlike the development demo password (which
+// dev mode repairs on every boot): an operator's UI edits to branding must
+// survive restarts in every environment, so config is only the cold-start
+// default. A non-empty DisplayName is what arms the seed; the other fields
+// ride along with it.
+type BrandingSeedConfig struct {
+	DisplayName  string
+	PrimaryColor string
+	FontKey      string
+	LogoPath     string
 }
 
 // DefaultConfig returns the runtime defaults used when a key is missing — and a
@@ -241,6 +258,18 @@ func applyConfig(cfg *Config, section, key, value string) error {
 			cfg.Seed.AdminEmail = value
 		case "admin_password":
 			cfg.Seed.AdminPassword = value
+		// The branding_* keys are FLAT under seed: (this parser is two-level
+		// by design — see the package comment). They seed the tenant's
+		// first-boot branding profile and are applied only when the tenant
+		// has no branding record — never re-asserted (see BrandingSeedConfig).
+		case "branding_display_name":
+			cfg.Seed.Branding.DisplayName = value
+		case "branding_primary_color":
+			cfg.Seed.Branding.PrimaryColor = value
+		case "branding_font":
+			cfg.Seed.Branding.FontKey = value
+		case "branding_logo_path":
+			cfg.Seed.Branding.LogoPath = value
 		default:
 			return fmt.Errorf("unknown seed key %q", key)
 		}

@@ -27,26 +27,36 @@ const (
 	adminLogoutPath = "/admin/logout"
 )
 
+// adminLoginTemplate is the pre-auth sign-in page. There is no stylesheet
+// before authentication (the shell's CSS sits behind the admin surface), so
+// the palette is inlined — and its literals are the pk token pipeline's
+// default theme values, taken directly from
+// pk-design/pkg/themes/default.tokens.json (color.surface.canvas/primary,
+// color.text.primary/muted, color.border.default, color.accent.default/
+// hover/on, color.status.danger/dangerbg, color.focus, font.body), so the
+// login page matches the shell chrome it signs the operator into.
 var adminLoginTemplate = template.Must(template.New("admin-login").Parse(`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Sign in — PlatformKit</title>
+<title>Sign in — {{.AppName}}</title>
 <style>
-  body { margin:0; background:#0F172A; color:#F8FAFC; font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; display:flex; min-height:100vh; align-items:center; justify-content:center; }
-  form { background:#1E293B; border:1px solid #334155; border-radius:12px; padding:32px; width:340px; box-sizing:border-box; }
+  body { margin:0; background:#f2efe7; color:#15221f; font-family:"IBM Plex Sans", Aptos, "Helvetica Neue", sans-serif; display:flex; min-height:100vh; align-items:center; justify-content:center; }
+  form { background:#fffdf7; border:1px solid #cbc5b8; border-radius:12px; padding:32px; width:340px; box-sizing:border-box; }
   h1 { font-size:20px; margin:0 0 4px; }
-  p.sub { color:#94A3B8; font-size:13px; margin:0 0 20px; }
-  label { display:block; font-size:12px; color:#94A3B8; margin:14px 0 4px; }
-  input { width:100%; box-sizing:border-box; background:#0F172A; border:1px solid #334155; border-radius:6px; color:#F8FAFC; padding:9px 10px; font-size:14px; }
-  button { width:100%; margin-top:20px; background:#2DD4BF; color:#0F172A; border:0; border-radius:6px; padding:10px; font-weight:700; font-size:14px; cursor:pointer; }
-  .err { background:#7f1d1d33; border:1px solid #b91c1c; color:#fecaca; border-radius:6px; padding:8px 10px; font-size:13px; margin-bottom:8px; }
+  p.sub { color:#5f6b65; font-size:13px; margin:0 0 20px; }
+  label { display:block; font-size:12px; color:#5f6b65; margin:14px 0 4px; }
+  input { width:100%; box-sizing:border-box; background:#fffdf7; border:1px solid #cbc5b8; border-radius:6px; color:#15221f; padding:9px 10px; font-size:14px; }
+  input:focus { outline:2px solid #326de6; outline-offset:1px; }
+  button { width:100%; margin-top:20px; background:#0f5d4e; color:#f9fff9; border:0; border-radius:6px; padding:10px; font-weight:700; font-size:14px; cursor:pointer; }
+  button:hover { background:#0a493e; }
+  .err { background:#fbe5e2; border:1px solid #9e3833; color:#9e3833; border-radius:6px; padding:8px 10px; font-size:13px; margin-bottom:8px; }
 </style>
 </head>
 <body>
 <form method="post" action="/admin/login">
   <h1>Sign in</h1>
-  <p class="sub">PlatformKit admin</p>
+  <p class="sub">{{.AppName}} admin</p>
   {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
   <label for="tenant_id">Tenant ID</label>
   <input id="tenant_id" name="tenant_id" value="{{.TenantID}}" autocomplete="off">
@@ -84,7 +94,7 @@ func (a *App) registerAdminAuth(mux *http.ServeMux) {
 	mux.HandleFunc(adminLoginPath, func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			renderAdminLogin(w, "", "")
+			renderAdminLogin(w, a.appName, "", "")
 		case http.MethodPost:
 			a.handleAdminLogin(w, r)
 		default:
@@ -104,19 +114,26 @@ func (a *App) registerAdminAuth(mux *http.ServeMux) {
 	})
 }
 
-func renderAdminLogin(w http.ResponseWriter, tenantID, errMsg string) {
+// renderAdminLogin renders the sign-in page. appName comes from cfg.AppName
+// via App.appName so a rebranded deployment's login page carries its own
+// product name, not the starter's.
+func renderAdminLogin(w http.ResponseWriter, appName, tenantID, errMsg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	status := http.StatusOK
 	if errMsg != "" {
 		status = http.StatusUnauthorized
 	}
 	w.WriteHeader(status)
-	_ = adminLoginTemplate.Execute(w, map[string]string{"Error": errMsg, "TenantID": tenantID})
+	_ = adminLoginTemplate.Execute(w, map[string]string{
+		"AppName":  appName,
+		"Error":    errMsg,
+		"TenantID": tenantID,
+	})
 }
 
 func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		renderAdminLogin(w, "", "invalid form submission")
+		renderAdminLogin(w, a.appName, "", "invalid form submission")
 		return
 	}
 	tenantID := r.PostForm.Get("tenant_id")
@@ -127,7 +144,7 @@ func (a *App) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Uniform message: never disclose whether the tenant, user, or
 		// password was the wrong part.
-		renderAdminLogin(w, tenantID, "Sign in failed. Check your tenant, email, and password.")
+		renderAdminLogin(w, a.appName, tenantID, "Sign in failed. Check your tenant, email, and password.")
 		return
 	}
 	if err := cookies.Write(w, r, cookies.KindSession, sess.ID); err != nil {

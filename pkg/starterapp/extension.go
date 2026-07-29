@@ -1,7 +1,7 @@
 // Package starterapp — extension.go is the supported seam for adding your own
 // modules to the batteries-included starter without rebuilding BuildApp.
 //
-// A contributed module is composed into the SAME catalog as the nine built-ins
+// A contributed module is composed into the SAME catalog as the ten built-ins
 // (so its declared dependencies and health checks are validated at compose
 // time, not at runtime) and its routes are mounted on the SAME mux, behind the
 // SAME identity, mutation-gate, and 1 MiB request-body-cap middleware — so a
@@ -72,7 +72,7 @@ type options struct {
 type Option func(*options)
 
 // WithModules contributes custom modules to the batteries-included starter.
-// Each is composed into the same catalog as the nine built-ins and its routes
+// Each is composed into the same catalog as the ten built-ins and its routes
 // are mounted behind the same security middleware.
 //
 //	app, err := starterapp.BuildApp(ctx, cfg, starterapp.WithModules(

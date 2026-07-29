@@ -40,9 +40,11 @@ func freshConfig(t *testing.T) *Config {
 	return cfg
 }
 
-// TestComposeAllNineModulesIntoCatalog proves the catalog composes cleanly
-// and contains exactly the nine OSS modules promised by Phase C.1.
-func TestComposeAllNineModulesIntoCatalog(t *testing.T) {
+// TestComposeAllTenModulesIntoCatalog proves the catalog composes cleanly and
+// contains exactly the ten OSS modules the starter promises — the original
+// nine from Phase C.1 plus branding_management (tenant branding + the
+// first-login setup gate).
+func TestComposeAllTenModulesIntoCatalog(t *testing.T) {
 	t.Parallel()
 
 	cfg := freshConfig(t)
@@ -57,6 +59,7 @@ func TestComposeAllNineModulesIntoCatalog(t *testing.T) {
 		"api_key_management",
 		"audit_management",
 		"auth_management",
+		"branding_management",
 		"content_management",
 		"health_management",
 		"notification_management",
@@ -201,6 +204,7 @@ func TestRoutesAreRegistered(t *testing.T) {
 		{"api-keys list", "/api/v1/api-keys"},
 		{"content list", "/api/v1/content?tenant_id=" + seed.TenantID},
 		{"notifications list", "/api/v1/notifications?user_id=" + seed.UserID},
+		{"branding profile", "/api/v1/branding"},
 	}
 	for _, c := range cruds {
 		requireStatus(

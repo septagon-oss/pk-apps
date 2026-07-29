@@ -1,8 +1,8 @@
 // Package main is pk-apps's thin wrapper around the importable starterapp
-// package — the flagship "git clone and go run ." demo that composes all nine
+// package — the flagship "git clone and go run ." demo that composes all ten
 // OSS PlatformKit modules (tenant, user, audit, health, auth, api_key, content,
-// notification, admin) against a single SQLite database and serves them through
-// one HTTP listener.
+// notification, branding, admin) against a single SQLite database and serves
+// them through one HTTP listener.
 //
 // All application logic — the module composition graph, the shared *sql.DB, the
 // HTTP mux, the first-boot seed, and the serve loop — lives in

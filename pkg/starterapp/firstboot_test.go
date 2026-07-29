@@ -168,6 +168,7 @@ func TestDataModulesShareOneConnectionPool(t *testing.T) {
 		"api_key":      app.apiKey.Store(),
 		"content":      app.contentMod.Store(),
 		"notification": app.notification.Store(),
+		"branding":     app.branding.Store(),
 	}
 	for name, st := range stores {
 		holder, ok := st.(dbHolder)

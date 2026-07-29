@@ -1,6 +1,6 @@
 // Package starterapp_test — example_test.go carries the pkg.go.dev examples
 // for the two entry points a host touches first: Run (boot the composed
-// nine-module app) and LoadConfig (fail-closed configuration loading).
+// ten-module app) and LoadConfig (fail-closed configuration loading).
 //
 // Validates: REQ-016.
 // Per: ADR-0017.
@@ -20,7 +20,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Example boots the full starter: SQLite store, nine modules, seeded demo
+// Example boots the full starter: SQLite store, ten modules, seeded demo
 // tenant, HTTP on :8080. This is the entire main function of the platformkit
 // front door. (Compile-only: Run serves until the context is canceled.)
 func Example() {

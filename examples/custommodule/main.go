@@ -3,7 +3,7 @@
 // Discipline: C-14.
 
 // main.go is the canonical example of extending the batteries-included starter
-// with your OWN module. It boots the full nine-module app via starterapp.Run
+// with your OWN module. It boots the full ten-module app via starterapp.Run
 // and contributes one custom, tenant-scoped "widgets" module through
 // starterapp.WithModules. The custom routes are mounted on the same mux as the
 // built-ins, so they inherit the identity middleware, the anonymous-mutation

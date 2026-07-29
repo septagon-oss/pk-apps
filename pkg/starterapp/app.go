@@ -1,8 +1,8 @@
 // Package starterapp is the importable single source of truth for the
 // PlatformKit OSS "git clone and go run ." starter monolith. It composes all
-// nine OSS PlatformKit modules (tenant, user, audit, health, auth, api_key,
-// content, notification, admin) against a single SQLite database and exposes
-// them through one http.Handler.
+// ten OSS PlatformKit modules (tenant, user, audit, health, auth, api_key,
+// content, notification, branding, admin) against a single SQLite database and
+// exposes them through one http.Handler.
 //
 // This package exists so the application's construction graph has exactly ONE
 // home. Both pk-apps's own `apps/starter-saas` binary and the public front-door
@@ -38,9 +38,12 @@ package starterapp
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"expvar"
 	"fmt"
+	"html"
 	"net/http"
+	"os"
 
 	pkmodule "github.com/septagon-oss/pk-core/pkg/module"
 	"github.com/septagon-oss/pk-core/pkg/security/cookies"
@@ -52,6 +55,9 @@ import (
 	"github.com/septagon-oss/pk-modules/pkg/audit"
 	auditsqlite "github.com/septagon-oss/pk-modules/pkg/audit/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/auth"
+	"github.com/septagon-oss/pk-modules/pkg/branding"
+	brandingstore "github.com/septagon-oss/pk-modules/pkg/branding/store"
+	brandingsqlite "github.com/septagon-oss/pk-modules/pkg/branding/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/content"
 	contentsqlite "github.com/septagon-oss/pk-modules/pkg/content/store/sqlite"
 	healthmod "github.com/septagon-oss/pk-modules/pkg/health"
@@ -87,6 +93,7 @@ type App struct {
 	apiKey       *apikey.Module
 	contentMod   *content.Module
 	notification *notification.Module
+	branding     *branding.Module
 
 	catalog *pkmodule.Catalog
 	host    *host.Host
@@ -97,6 +104,7 @@ type App struct {
 
 	modules       []string
 	adminBasePath string
+	appName       string
 	seedEmail     string
 	seedPassword  string
 
@@ -173,6 +181,11 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("notification store: %w", err)
 	}
+	brandingStore, err := brandingsqlite.New(db)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("branding store: %w", err)
+	}
 
 	// closeOnErr closes the shared DB if module construction below fails, so a
 	// partial boot does not leak the pool. Cleared once the App takes ownership.
@@ -184,9 +197,18 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	}()
 
 	// 1. Admin shell first — every other module wires AdminRegistrar into it.
+	//
+	// The shell needs a portslib.BrandingResolver at construction, but the
+	// branding MODULE needs the shell's registrar (its admin page) — a genuine
+	// construction cycle. It is broken with branding.NewService, the module's
+	// exported service constructor: a branding.Service is a stateless wrapper
+	// over its store, so the resolver handed to the shell here and the service
+	// the branding module builds below over the SAME brandingStore read the
+	// same rows and can never disagree.
 	adminMod, err := admin.NewModule(
 		admin.WithTitle(cfg.AppName+" Admin"),
 		admin.WithBasePath("/admin"),
+		admin.WithBranding(branding.NewService(brandingStore)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("admin module: %w", err)
@@ -287,6 +309,22 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		return nil, fmt.Errorf("notification module: %w", err)
 	}
 
+	// 10. Branding_management — per-tenant chrome (display name, logo,
+	//     palette, font) plus the first-login setup gate. Its Service is the
+	//     same stateless wrapper over brandingStore that the admin shell
+	//     received via admin.WithBranding above. The store's constructor
+	//     already ran the module's schema migrations on the shared handle,
+	//     exactly like every sibling store.
+	brandingMod, err := branding.NewModule(
+		branding.WithStore(brandingStore),
+		branding.WithAdminRegistrar(adminReg),
+		branding.WithHealthRegistrar(healthReg),
+		branding.WithAdminBasePath(adminMod.BasePath()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("branding module: %w", err)
+	}
+
 	// Outside development, force Secure on all cookies. A production deployment
 	// typically sits behind a TLS-terminating proxy that may not forward the
 	// scheme, in which case the session cookie would otherwise ship without
@@ -304,6 +342,9 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	if _, err := seed.Run(ctx, tenantMod.Service(), userMod.Service(), seedParams); err != nil {
 		return nil, fmt.Errorf("seed: %w", err)
 	}
+	if err := seedBranding(ctx, cfg, brandingMod); err != nil {
+		return nil, err
+	}
 
 	// Compose the catalog. Order in defaults matters only for human-friendly
 	// listings; pk-core's compose pass topologically sorts on declared deps.
@@ -317,6 +358,7 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		apikey.ModuleID,
 		content.ModuleID,
 		notification.ModuleID,
+		branding.ModuleID,
 	}
 	entries := []pkmodule.Entry{
 		{ID: admin.ModuleID, New: adminMod.Compose},
@@ -328,6 +370,7 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		{ID: apikey.ModuleID, New: apiKeyMod.Compose},
 		{ID: content.ModuleID, New: contentMod.Compose},
 		{ID: notification.ModuleID, New: notificationMod.Compose},
+		{ID: branding.ModuleID, New: brandingMod.Compose},
 	}
 
 	// Contributed modules (starterapp.WithModules). Each is built against the
@@ -395,15 +438,56 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		apiKey:        apiKeyMod,
 		contentMod:    contentMod,
 		notification:  notificationMod,
+		branding:      brandingMod,
 		catalog:       catalog,
 		host:          runtimeHost,
 		db:            db,
 		modules:       modules,
 		adminBasePath: adminMod.BasePath(),
+		appName:       cfg.AppName,
 		extra:         extraPlugins,
 	}
 	app.seedEmail, app.seedPassword = seedBannerCredential(cfg, seedParams)
 	return app, nil
+}
+
+// seedBranding applies the optional seed.branding_* config to the seeded
+// tenant — but ONLY when that tenant has no branding record at all. It is
+// never re-asserted on later boots, in any environment: deliberately unlike
+// the development demo password (which dev mode repairs every boot), an
+// operator's UI edits to branding must survive restarts, so config is only
+// the cold-start default. Save validates every field and stamps the tenant's
+// setup as complete, which is what lets a seeded deployment bypass the
+// first-login setup gate entirely.
+func seedBranding(ctx context.Context, cfg *Config, brandingMod *branding.Module) error {
+	b := cfg.Seed.Branding
+	if b.DisplayName == "" {
+		return nil
+	}
+	if _, err := brandingMod.Store().Get(ctx, seed.TenantID); err == nil {
+		// A record exists — an operator (or an earlier seed) already branded
+		// this tenant. Never overwrite it.
+		return nil
+	} else if !errors.Is(err, brandingstore.ErrNotFound) {
+		return fmt.Errorf("seed branding: %w", err)
+	}
+	params := branding.SaveParams{
+		DisplayName:  b.DisplayName,
+		PrimaryColor: b.PrimaryColor,
+		FontKey:      b.FontKey,
+	}
+	if b.LogoPath != "" {
+		data, err := os.ReadFile(b.LogoPath)
+		if err != nil {
+			return fmt.Errorf("seed branding: read logo %q: %w", b.LogoPath, err)
+		}
+		params.LogoData = data
+		params.LogoContentType = http.DetectContentType(data)
+	}
+	if err := brandingMod.Service().Save(ctx, seed.TenantID, params); err != nil {
+		return fmt.Errorf("seed branding: %w", err)
+	}
+	return nil
 }
 
 // Close releases application-owned resources. The shared SQLite *sql.DB is
@@ -447,6 +531,7 @@ func (a *App) Mux() (http.Handler, error) {
 	a.apiKey.HTTPHandler().RegisterRoutes(mux)
 	a.contentMod.HTTPHandler().RegisterRoutes(mux)
 	a.notification.HTTPHandler().RegisterRoutes(mux)
+	a.branding.HTTPHandler().RegisterRoutes(mux)
 
 	// Contributed modules (starterapp.WithModules): authenticated routes go on
 	// the main mux (behind the mutation gate); public routes go on a separate
@@ -526,9 +611,13 @@ func (a *App) indexHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// The title and heading come from cfg.AppName (escaped: it is
+	// operator-supplied config, not trusted markup), so a rebranded
+	// deployment never advertises the starter's internal name.
+	appName := html.EscapeString(a.appName)
 	fmt.Fprintf(w, `<!doctype html>
-<html><head><title>starter-saas</title></head><body>
-<h1>starter-saas</h1>
+<html><head><title>%s</title></head><body>
+<h1>%s</h1>
 <p>PlatformKit OSS monolith composing %d modules.</p>
 <ul>
   <li><a href="%s">Admin UI</a></li>
@@ -537,7 +626,7 @@ func (a *App) indexHandler(w http.ResponseWriter, r *http.Request) {
 </ul>
 <p>Default login: <code>%s</code> / <code>%s</code></p>
 </body></html>`,
-		len(a.modules), a.adminBasePath, a.seedEmail, a.seedPassword)
+		appName, appName, len(a.modules), a.adminBasePath, a.seedEmail, a.seedPassword)
 }
 
 // ModuleIDs returns the human-ordered list of catalog-composed module IDs.
