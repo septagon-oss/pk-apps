@@ -14,19 +14,31 @@ package starterapp
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
+	"github.com/septagon-oss/pk-modules/pkg/user"
 )
 
 // resolveSeedParams derives the seed parameters from configuration. In a
-// development environment it falls back to the demo login and enables password
-// self-repair. In any other environment seed.admin_password is REQUIRED and the
-// password is never re-asserted, so an operator's changed credential survives a
-// restart.
+// development environment it falls back to the local bootstrap identity and
+// enables password self-repair. In any other environment seed.admin_password
+// is REQUIRED and the password is never re-asserted, so an operator's changed
+// credential survives a restart.
 func resolveSeedParams(cfg *Config) (seed.Params, error) {
-	email := cfg.Seed.AdminEmail
+	email := strings.TrimSpace(cfg.Seed.AdminEmail)
+	if cfg.Seed.AdminEmail != "" && email == "" {
+		return seed.Params{}, fmt.Errorf("starterapp: seed.admin_email must not be blank")
+	}
 	if email == "" {
 		email = seed.UserEmail
+	}
+	at := strings.LastIndex(email, "@")
+	if strings.Count(email, "@") != 1 || at <= 0 || at == len(email)-1 {
+		return seed.Params{}, fmt.Errorf(
+			"starterapp: seed.admin_email %q must contain a nonempty local part and domain",
+			email,
+		)
 	}
 	dev := cfg.Environment == "development"
 	password := cfg.Seed.AdminPassword
@@ -34,9 +46,20 @@ func resolveSeedParams(cfg *Config) (seed.Params, error) {
 		if !dev {
 			return seed.Params{}, fmt.Errorf(
 				"starterapp: seed.admin_password is required when environment is %q "+
-					"(only \"development\" may use the built-in demo password)", cfg.Environment)
+					"(only \"development\" may use the local bootstrap password)", cfg.Environment)
 		}
 		password = seed.UserPass
+	}
+	if password == knownPublicBootstrapPassword {
+		return seed.Params{}, fmt.Errorf(
+			"starterapp: seed.admin_password must not use a password published in this project's history",
+		)
+	}
+	if len([]byte(password)) > user.MaxPasswordBytes {
+		return seed.Params{}, fmt.Errorf(
+			"starterapp: seed.admin_password must be at most %d UTF-8 bytes",
+			user.MaxPasswordBytes,
+		)
 	}
 	return seed.Params{
 		AdminEmail:     email,
@@ -45,14 +68,19 @@ func resolveSeedParams(cfg *Config) (seed.Params, error) {
 	}, nil
 }
 
-// seedBannerCredential returns what the startup banner and the unauthenticated
-// index page should show for the login. The real credentials are only shown in
-// development (a local demo); outside development BOTH the email and password
-// are redacted, so the public root page does not hand an unauthenticated
-// visitor a valid admin username to brute-force.
+// seedBannerCredential returns what the development-only startup banner may
+// show for the local login. Outside development the email remains available to
+// the operator while the password is redacted; the public root page never
+// renders either value.
 func seedBannerCredential(cfg *Config, params seed.Params) (email, password string) {
 	if cfg.Environment == "development" {
 		return params.AdminEmail, params.AdminPassword
 	}
-	return "(see seed.admin_email)", "(set via seed.admin_password)"
+	return params.AdminEmail, "(set via seed.admin_password)"
 }
+
+// knownPublicBootstrapPassword shipped as the built-in administrator password
+// in early releases, so it is published in this repository's git history and in
+// every copy of those tags. It is refused outright: a deployment that sets it is
+// choosing a credential an attacker can look up.
+const knownPublicBootstrapPassword = "changeme"

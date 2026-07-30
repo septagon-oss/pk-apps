@@ -18,7 +18,5 @@ build/
 node_modules/
 
 # Local binaries & databases
-/pk
-/minimal
 *.db
 .tmp-*/

@@ -2,27 +2,29 @@
 
 ## Purpose
 
-Runnable PlatformKit OSS app compositions and examples. Demonstrates how modules, runtime, and core contracts compose into working applications.
+Own the single importable PlatformKit OSS starter composition used by the
+public `platformkit` front door and downstream applications.
 
-## In Scope
+## In scope
 
-- `starter-saas`: a complete, runnable SaaS application with 9 composed modules, SQLite persistence, admin UI, health checks, and Prometheus metrics
-- `cmd/`: individual application binaries and entry points
-- `examples/`: focused code samples showing specific composition patterns
-- `minimal/`: the smallest possible PlatformKit application
+- `pkg/starterapp`: the canonical nine-module composition, HTTP perimeter,
+  local bootstrap, configuration, and lifecycle.
+- `reference/custommodule`: one non-shipped downstream extension reference.
+- Conformance, security, and end-to-end tests for the composition.
 
-## Out of Scope
+## Out of scope
 
-- Production deployment configurations (Docker Compose, Kubernetes manifests)
-- Staging or demo infrastructure
-- Benchmarking or load-testing harnesses
-- Commercial product compositions with Pro modules
+- Runnable application binaries or alternate starters.
+- Teaching-only module bundles.
+- Sample products, client domains, showcase applications, or hosted-service
+  assumptions.
+- Production deployment manifests and staging state.
 
 ## Dependencies
 
-- `github.com/septagon-oss/pk-core` — core contracts
-- `github.com/septagon-oss/pk-modules` — reference module implementations
-- `github.com/septagon-oss/pk-runtime` — runtime host and HTTP contracts
-- `github.com/septagon-oss/pk-shared` — shared vocabulary
-- `github.com/septagon-oss/pk-testkit` — test helpers
-- `modernc.org/sqlite` — embeddable database
+- `github.com/septagon-oss/pk-core` — core contracts.
+- `github.com/septagon-oss/pk-modules` — reusable module implementations.
+- `github.com/septagon-oss/pk-runtime` — runtime host and HTTP contracts.
+- `github.com/septagon-oss/pk-shared` — shared vocabulary.
+- `github.com/septagon-oss/pk-testkit` — test helpers.
+- `modernc.org/sqlite` — embeddable database.

@@ -25,6 +25,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/septagon-oss/pk-modules/pkg/portslib"
+	"time"
+
 	_ "modernc.org/sqlite"
 
 	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
@@ -115,7 +118,7 @@ func TestCrossTenantAndAnonymousAPIAccessDenied(t *testing.T) {
 
 	// (2) The IDOR: the authenticated admin knows the victim row's exact ID but
 	// belongs to a different tenant. The read must be 404 — never the row.
-	if code, body := authGet("/api/v1/content/" + victimID); code != http.StatusNotFound {
+	if code, body := authGet("/api/v1/content/" + encodeID(t, victimID)); code != http.StatusNotFound {
 		t.Fatalf("cross-tenant GET /api/v1/content/%s = %d, want 404; body=%s", victimID, code, body)
 	}
 
@@ -125,4 +128,106 @@ func TestCrossTenantAndAnonymousAPIAccessDenied(t *testing.T) {
 	if code, body := authGet("/api/v1/content"); code != http.StatusOK {
 		t.Fatalf("authenticated GET /api/v1/content (own tenant) = %d, want 200; body=%s", code, body)
 	}
+}
+
+func TestUsersWriteAPIKeyCannotReplaceLoginPassword(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "pk.db")
+	cfg := DefaultConfig()
+	cfg.Database.DSN = fmt.Sprintf("file:%s?cache=shared&mode=rwc", dbPath)
+	cfg.HTTP.Addr = ":0"
+
+	ctx := context.Background()
+	app, err := BuildApp(ctx, cfg)
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	defer app.Close()
+
+	before, err := app.user.Service().Get(ctx, seed.TenantID, seed.UserID)
+	if err != nil {
+		t.Fatalf("read seeded administrator: %v", err)
+	}
+	plaintext, _, err := app.apiKey.Service().Issue(
+		ctx,
+		seed.TenantID,
+		seed.UserID,
+		"users automation",
+		[]string{scopeUsersWrite},
+		time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("issue users:write API key: %v", err)
+	}
+
+	srv := httptest.NewServer(mustMux(t, app))
+	defer srv.Close()
+	body := fmt.Sprintf(
+		`{"email":%q,"username":%q,"display_name":"Changed","password":"machine-selected-password","active":true}`,
+		before.Email,
+		before.Username,
+	)
+	req, err := http.NewRequest(
+		http.MethodPut,
+		srv.URL+"/api/v1/users/"+encodeID(t, seed.UserID),
+		strings.NewReader(body),
+	)
+	if err != nil {
+		t.Fatalf("create password-reset request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+plaintext)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("send password-reset request: %v", err)
+	}
+	responseBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf(
+			"users:write API-key password reset = %d, want 403; body=%s",
+			resp.StatusCode,
+			responseBody,
+		)
+	}
+
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		seed.TenantID,
+		seed.UserID,
+		seed.UserPass,
+	); err != nil {
+		t.Fatalf("seeded password changed after rejected API-key request: %v", err)
+	}
+	if err := app.user.Service().VerifyPassword(
+		ctx,
+		seed.TenantID,
+		seed.UserID,
+		"machine-selected-password",
+	); err == nil {
+		t.Fatal("API-key-selected password verifies after rejected request")
+	}
+	after, err := app.user.Service().Get(ctx, seed.TenantID, seed.UserID)
+	if err != nil {
+		t.Fatalf("read administrator after rejected request: %v", err)
+	}
+	if after.DisplayName != before.DisplayName {
+		t.Fatalf(
+			"display name = %q after rejected request, want %q",
+			after.DisplayName,
+			before.DisplayName,
+		)
+	}
+}
+
+// encodeID renders an entity id as the canonical opaque path segment the API
+// requires, which is the form a client puts on the wire.
+func encodeID(t *testing.T, id string) string {
+	t.Helper()
+	segment, ok := portslib.EncodeEntityID(id)
+	if !ok {
+		t.Fatalf("encode entity id %q", id)
+	}
+	return segment
 }

@@ -26,6 +26,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/septagon-oss/pk-modules/pkg/portslib"
+
 	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
 )
 
@@ -82,6 +84,83 @@ func specOps(t *testing.T) map[string]map[string]bool {
 		t.Fatal("parsed zero operations from api/openapi.yaml")
 	}
 	return ops
+}
+
+func TestOpenAPISpecVersionMatchesDefaultConfig(t *testing.T) {
+	t.Parallel()
+
+	spec, err := os.ReadFile(filepath.Join("..", "..", "api", "openapi.yaml"))
+	if err != nil {
+		t.Fatalf("read spec: %v", err)
+	}
+	match := regexp.MustCompile(`(?m)^  version: (\S+)\s*$`).FindSubmatch(spec)
+	if len(match) != 2 {
+		t.Fatal("api/openapi.yaml is missing info.version")
+	}
+	if got, want := string(match[1]), DefaultConfig().AppVersion; got != want {
+		t.Fatalf("api/openapi.yaml info.version = %q, want runtime version %q", got, want)
+	}
+}
+
+func TestOpenAPIPasswordLimitUsesUTF8Bytes(t *testing.T) {
+	t.Parallel()
+
+	spec, err := os.ReadFile(filepath.Join("..", "..", "api", "openapi.yaml"))
+	if err != nil {
+		t.Fatalf("read spec: %v", err)
+	}
+	if !strings.Contains(string(spec), "x-max-utf8-bytes: 72") {
+		t.Fatal("UserInput.password is missing its 72-byte UTF-8 limit")
+	}
+	if strings.Contains(string(spec), "maxLength: 72") {
+		t.Fatal("password byte limit is incorrectly documented as a character-count maxLength")
+	}
+}
+
+func TestOpenAPIPasswordMutationDocumentsAdminCapability(t *testing.T) {
+	t.Parallel()
+
+	spec, err := os.ReadFile(filepath.Join("..", "..", "api", "openapi.yaml"))
+	if err != nil {
+		t.Fatalf("read spec: %v", err)
+	}
+	if !strings.Contains(
+		string(spec),
+		"restricted to callers with the reserved `admin` scope",
+	) {
+		t.Fatal("UserInput.password does not document its administrator-only capability")
+	}
+	ops := specOps(t)
+	for _, operation := range []string{
+		"POST /api/v1/users",
+		"PUT /api/v1/users/{id}",
+	} {
+		if !ops[operation]["403"] {
+			t.Errorf("%s does not declare the password-capability 403 response", operation)
+		}
+	}
+}
+
+func TestOpenAPIProtectedOperationsDocumentForbidden(t *testing.T) {
+	t.Parallel()
+
+	for operation, responses := range specOps(t) {
+		parts := strings.SplitN(operation, " ", 2)
+		if len(parts) != 2 {
+			t.Fatalf("malformed parsed operation %q", operation)
+		}
+		path := parts[1]
+		protected := false
+		for _, rule := range builtinAPIScopeRules {
+			if path == rule.path || strings.HasPrefix(path, rule.path+"/") {
+				protected = true
+				break
+			}
+		}
+		if protected && !responses["403"] {
+			t.Errorf("%s is scope-protected but does not declare 403", operation)
+		}
+	}
 }
 
 func TestOpenAPISpecMatchesApp(t *testing.T) {
@@ -144,12 +223,22 @@ func TestOpenAPISpecMatchesApp(t *testing.T) {
 		}
 		return decoded
 	}
+	// Identifiers travel in a path as one canonical opaque segment, so every
+	// URL built here encodes the way a client does. Bearer tokens are not path
+	// segments and stay raw.
+	seg := func(raw string) string {
+		segment, ok := portslib.EncodeEntityID(raw)
+		if !ok {
+			t.Fatalf("encode entity id %q", raw)
+		}
+		return segment
+	}
 	id := func(m map[string]any, key string) string {
 		v, _ := m[key].(string)
 		if v == "" {
 			t.Fatalf("fixture response missing %q: %v", key, m)
 		}
-		return v
+		return seg(v)
 	}
 
 	// --- health (open) ---
@@ -160,15 +249,15 @@ func TestOpenAPISpecMatchesApp(t *testing.T) {
 	// --- auth ---
 	login := fmt.Sprintf(`{"tenant_id":%q,"email":%q,"password":%q}`, seed.TenantID, seed.UserEmail, seed.UserPass)
 	sess2 := call("POST", "/api/v1/auth/sessions", "/api/v1/auth/sessions", login, false, 201)
-	call("GET", "/api/v1/auth/sessions/{id}", "/api/v1/auth/sessions/"+sid, "", true, 200)
+	call("GET", "/api/v1/auth/sessions/{id}", "/api/v1/auth/sessions/"+seg(sid), "", true, 200)
 	call("DELETE", "/api/v1/auth/sessions/{id}", "/api/v1/auth/sessions/"+id(sess2, "id"), "", true, 204)
 
 	// --- tenants (provisioning is a platform op: POST is always 403; a
 	// caller may only touch its own tenant, so DELETE runs last) ---
 	call("GET", "/api/v1/tenants", "/api/v1/tenants", "", true, 200)
-	call("GET", "/api/v1/tenants/{id}", "/api/v1/tenants/"+seed.TenantID, "", true, 200)
+	call("GET", "/api/v1/tenants/{id}", "/api/v1/tenants/"+seg(seed.TenantID), "", true, 200)
 	call("POST", "/api/v1/tenants", "/api/v1/tenants", `{"slug":"conf-t","name":"Conformance"}`, true, 403)
-	call("PUT", "/api/v1/tenants/{id}", "/api/v1/tenants/"+seed.TenantID, fmt.Sprintf(`{"slug":%q,"name":%q}`, seed.TenantSlug, seed.TenantName), true, 200)
+	call("PUT", "/api/v1/tenants/{id}", "/api/v1/tenants/"+seg(seed.TenantID), fmt.Sprintf(`{"slug":%q,"name":%q}`, seed.TenantSlug, seed.TenantName), true, 200)
 
 	// --- users ---
 	call("GET", "/api/v1/users", "/api/v1/users", "", true, 200)
@@ -178,7 +267,7 @@ func TestOpenAPISpecMatchesApp(t *testing.T) {
 	call("DELETE", "/api/v1/users/{id}", "/api/v1/users/"+id(u, "id"), "", true, 204)
 
 	// --- api keys ---
-	k := call("POST", "/api/v1/api-keys", "/api/v1/api-keys", `{"name":"conf-key","scopes":["read"]}`, true, 201)
+	k := call("POST", "/api/v1/api-keys", "/api/v1/api-keys", `{"name":"conf-key","scopes":["content:read"]}`, true, 201)
 	call("GET", "/api/v1/api-keys", "/api/v1/api-keys", "", true, 200)
 	key, _ := k["key"].(map[string]any)
 	if key == nil {
@@ -254,7 +343,7 @@ func TestOpenAPISpecMatchesApp(t *testing.T) {
 
 	// --- tenant delete last: a caller may only delete its own tenant, and
 	// after that the walk is over ---
-	call("DELETE", "/api/v1/tenants/{id}", "/api/v1/tenants/"+seed.TenantID, "", true, 204)
+	call("DELETE", "/api/v1/tenants/{id}", "/api/v1/tenants/"+seg(seed.TenantID), "", true, 204)
 
 	// --- coverage: every spec operation must have been exercised ---
 	for op := range ops {

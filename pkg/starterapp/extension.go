@@ -5,7 +5,10 @@
 // (so its declared dependencies and health checks are validated at compose
 // time, not at runtime) and its routes are mounted on the SAME mux, behind the
 // SAME identity, mutation-gate, and 1 MiB request-body-cap middleware — so a
-// custom module inherits the full security perimeter for free.
+// custom module inherits authentication, request identity, the anonymous
+// mutation gate, and the body cap. Domain authorization is deliberately owned
+// by the module: RegisterRoutes MUST check the module's declared APIKeyScopes
+// (while allowing the reserved interactive administrator scope).
 //
 // Implements: REQ-016.
 // Per: ADR-0017.
@@ -18,6 +21,7 @@ import (
 
 	pkmodule "github.com/septagon-oss/pk-core/pkg/module"
 
+	"github.com/septagon-oss/pk-modules/pkg/audit"
 	"github.com/septagon-oss/pk-modules/pkg/portslib"
 )
 
@@ -29,6 +33,23 @@ type ModuleEnv struct {
 	DB     *sql.DB
 	Admin  portslib.AdminRegistrar
 	Health portslib.HealthRegistrar
+	Audit  audit.AuditService
+}
+
+// OpenAPIOperation describes one HTTP operation contributed by an extension.
+// The starter publishes these declarations as an OpenAPI 3.1 document at
+// /openapi/extensions.json. It deliberately models the small common surface
+// extensions need while allowing the module's own repository to carry richer
+// request and response schemas when required.
+type OpenAPIOperation struct {
+	OperationID   string
+	Method        string
+	Path          string
+	Summary       string
+	Description   string
+	Tags          []string
+	Public        bool
+	SuccessStatus int
 }
 
 // ModulePlugin is what a contributed module returns. RegisterRoutes is
@@ -47,6 +68,8 @@ type ModulePlugin struct {
 	// RegisterRoutes mounts the module's AUTHENTICATED HTTP routes. They sit
 	// behind the full perimeter: identity resolution, the anonymous-mutation
 	// gate, and the request-body cap — exactly like the built-in modules.
+	// Authentication is not domain authorization: each route must require an
+	// appropriate APIKeyScopes capability or the interactive "admin" scope.
 	// Optional (a module may be public-only).
 	RegisterRoutes func(mux *http.ServeMux)
 	// RegisterPublicRoutes mounts routes that are reachable WITHOUT
@@ -56,6 +79,15 @@ type ModulePlugin struct {
 	// cap, but they bypass the anonymous-mutation gate at any path. Use this
 	// only for surfaces you intend to be world-reachable. Optional.
 	RegisterPublicRoutes func(mux *http.ServeMux)
+	// OpenAPI declares the extension's supported HTTP operations. BuildApp
+	// validates method/path/operation-ID uniqueness before accepting the
+	// plugin, then exposes one aggregate OpenAPI 3.1 document for tooling.
+	OpenAPI []OpenAPIOperation
+	// APIKeyScopes declares the exact machine capabilities this module accepts,
+	// for example "widgets:read" and "widgets:write". The starter adds these
+	// names to the API-key issuance catalog; undeclared names and typos are
+	// rejected with an actionable 400 response.
+	APIKeyScopes []string
 }
 
 // ExtraModule builds one contributed module from the shared environment. It
@@ -73,7 +105,8 @@ type Option func(*options)
 
 // WithModules contributes custom modules to the batteries-included starter.
 // Each is composed into the same catalog as the ten built-ins and its routes
-// are mounted behind the same security middleware.
+// are mounted behind the same identity middleware. The contributed module
+// remains responsible for domain-specific scope checks.
 //
 //	app, err := starterapp.BuildApp(ctx, cfg, starterapp.WithModules(
 //	    func(env starterapp.ModuleEnv) (starterapp.ModulePlugin, error) {
@@ -89,6 +122,7 @@ type Option func(*options)
 //	        return starterapp.ModulePlugin{
 //	            ID: note.ModuleID, Compose: m.Compose,
 //	            RegisterRoutes: m.HTTPHandler().RegisterRoutes,
+//	            APIKeyScopes: []string{"notes:read", "notes:write"},
 //	        }, nil
 //	    },
 //	))

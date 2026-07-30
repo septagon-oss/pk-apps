@@ -10,6 +10,7 @@ package starterapp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,8 +19,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/septagon-oss/pk-apps/pkg/starterapp/seed"
+	pkmodule "github.com/septagon-oss/pk-core/pkg/module"
+	"github.com/septagon-oss/pk-core/pkg/security/identity"
+	"github.com/septagon-oss/pk-modules/pkg/audit"
 	"github.com/septagon-oss/pk-modules/pkg/portslib"
 )
+
+const extWidgetReadScope = "widgets:read"
 
 func extTestConfig(t *testing.T) *Config {
 	t.Helper()
@@ -39,6 +46,11 @@ func (widgetHandler) RegisterRoutes(mux *http.ServeMux) {
 		if !ok {
 			return // 401 already written by RequestActor
 		}
+		principal := identity.PrincipalFromContext(r.Context())
+		if !principal.HasScope("admin") && !principal.HasScope(extWidgetReadScope) {
+			http.Error(w, "forbidden: "+extWidgetReadScope+" scope required", http.StatusForbidden)
+			return
+		}
 		fmt.Fprintf(w, "widget for %s/%s", tenant, subject)
 	})
 }
@@ -48,10 +60,21 @@ func TestWithModulesContributesAModule(t *testing.T) {
 	cfg := extTestConfig(t)
 
 	widget := func(env ModuleEnv) (ModulePlugin, error) {
-		if env.DB == nil || env.Admin == nil || env.Health == nil {
+		if env.DB == nil || env.Admin == nil || env.Health == nil || env.Audit == nil {
 			return ModulePlugin{}, fmt.Errorf("env not fully wired")
 		}
-		return ModulePlugin{ID: "widget", RegisterRoutes: widgetHandler{}.RegisterRoutes}, nil
+		return ModulePlugin{
+			ID:             "widget",
+			RegisterRoutes: widgetHandler{}.RegisterRoutes,
+			APIKeyScopes:   []string{extWidgetReadScope},
+			OpenAPI: []OpenAPIOperation{{
+				OperationID: "widgets.list",
+				Method:      http.MethodGet,
+				Path:        "/api/v1/widgets",
+				Summary:     "List widgets",
+				Tags:        []string{"widgets"},
+			}},
+		}, nil
 	}
 
 	app, err := BuildApp(context.Background(), cfg, WithModules(widget))
@@ -82,9 +105,87 @@ func TestWithModulesContributesAModule(t *testing.T) {
 	}
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !strings.Contains(string(b), "widget for tenant_acme/") {
+	if !strings.Contains(string(b), "widget for "+seed.TenantID+"/") {
 		t.Fatalf("authenticated widget body = %q, want it to see the caller's tenant", b)
 	}
+
+	if _, _, err := app.apiKey.Service().Issue(
+		context.Background(),
+		seed.TenantID,
+		seed.UserID,
+		"widget-reader",
+		[]string{extWidgetReadScope},
+		0,
+	); err != nil {
+		t.Fatalf("issue declared extension scope: %v", err)
+	}
+	if _, _, err := app.apiKey.Service().Issue(
+		context.Background(),
+		seed.TenantID,
+		seed.UserID,
+		"typo",
+		[]string{"widgets:reed"},
+		0,
+	); err == nil || !strings.Contains(err.Error(), "unknown scope") {
+		t.Fatalf("issue undeclared extension scope error = %v, want unknown scope", err)
+	}
+
+	specResp, err := http.Get(srv.URL + "/openapi/extensions.json")
+	if err != nil {
+		t.Fatalf("OpenAPI get: %v", err)
+	}
+	defer specResp.Body.Close()
+	var spec struct {
+		OpenAPI string `json:"openapi"`
+		Paths   map[string]map[string]struct {
+			OperationID string `json:"operationId"`
+		} `json:"paths"`
+	}
+	if err := json.NewDecoder(specResp.Body).Decode(&spec); err != nil {
+		t.Fatalf("decode OpenAPI: %v", err)
+	}
+	if spec.OpenAPI != "3.1.0" ||
+		spec.Paths["/api/v1/widgets"]["get"].OperationID != "widgets.list" {
+		t.Fatalf("unexpected extension OpenAPI document: %+v", spec)
+	}
+}
+
+func TestWithModulesUsesPublishedPortContractVersions(t *testing.T) {
+	t.Parallel()
+
+	plugin := func(ModuleEnv) (ModulePlugin, error) {
+		return ModulePlugin{
+			ID: "published_contract_consumer",
+			Compose: func() pkmodule.Composable {
+				return pkmodule.Must(
+					pkmodule.Metadata{ID: "published_contract_consumer", Version: "0.0.0"},
+					pkmodule.WithDependencies(
+						pkmodule.RequiresPort[audit.AuditService](pkmodule.PortSpec{
+							Version:           audit.ModuleVersion,
+							Purpose:           "Consume the published audit contract.",
+							PreferredProvider: "audit_management",
+						}),
+						pkmodule.RequiresPort[portslib.AdminRegistrar](pkmodule.PortSpec{
+							Version:           portslib.AdminRegistrarContractVersion,
+							Purpose:           "Consume the published admin contract.",
+							PreferredProvider: "admin_management",
+						}),
+					),
+				)
+			},
+			RegisterRoutes: func(*http.ServeMux) {},
+		}, nil
+	}
+
+	app, err := BuildApp(
+		context.Background(),
+		extTestConfig(t),
+		WithModules(plugin),
+	)
+	if err != nil {
+		t.Fatalf("BuildApp with published port contracts: %v", err)
+	}
+	defer app.Close()
 }
 
 func TestWithModulesPublicRoutesBypassTheGate(t *testing.T) {
@@ -123,7 +224,7 @@ func TestWithModulesPublicRoutesBypassTheGate(t *testing.T) {
 	defer srv.Close()
 
 	// Public POST works anonymously (the whole point).
-	resp, err := http.Post(srv.URL+"/join/acme", "application/json", strings.NewReader(`{}`))
+	resp, err := http.Post(srv.URL+"/join/example-org", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatalf("public post: %v", err)
 	}
@@ -164,6 +265,21 @@ func TestWithModulesRejectsBuiltinIDCollision(t *testing.T) {
 	}
 }
 
+func TestWithModulesRejectsReservedAPIKeyScope(t *testing.T) {
+	t.Parallel()
+	plugin := func(ModuleEnv) (ModulePlugin, error) {
+		return ModulePlugin{
+			ID:             "unsafe_scope",
+			RegisterRoutes: func(*http.ServeMux) {},
+			APIKeyScopes:   []string{"admin"},
+		}, nil
+	}
+	_, err := BuildApp(context.Background(), extTestConfig(t), WithModules(plugin))
+	if err == nil || !strings.Contains(err.Error(), "reserved for interactive authorization") {
+		t.Fatalf("expected reserved-scope error, got %v", err)
+	}
+}
+
 func TestWithModulesRequiresRoutes(t *testing.T) {
 	t.Parallel()
 	noRoutes := func(env ModuleEnv) (ModulePlugin, error) {
@@ -172,5 +288,117 @@ func TestWithModulesRequiresRoutes(t *testing.T) {
 	_, err := BuildApp(context.Background(), extTestConfig(t), WithModules(noRoutes))
 	if err == nil || !strings.Contains(err.Error(), "RegisterRoutes or RegisterPublicRoutes is required") {
 		t.Fatalf("expected routes-required error, got %v", err)
+	}
+}
+
+func TestWithModulesRejectsInvalidOrDuplicateOpenAPI(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		ops  []OpenAPIOperation
+		want string
+	}{
+		{
+			name: "invalid method",
+			ops:  []OpenAPIOperation{{OperationID: "widget.read", Method: "TRACE", Path: "/widgets", Summary: "Read"}},
+			want: "unsupported method",
+		},
+		{
+			name: "invalid path",
+			ops:  []OpenAPIOperation{{OperationID: "widget.read", Method: "GET", Path: "widgets", Summary: "Read"}},
+			want: "invalid canonical path",
+		},
+		{
+			name: "missing summary",
+			ops:  []OpenAPIOperation{{OperationID: "widget.read", Method: "GET", Path: "/widgets"}},
+			want: "summary is required",
+		},
+		{
+			name: "duplicate route",
+			ops: []OpenAPIOperation{
+				{OperationID: "widget.read", Method: "GET", Path: "/widgets", Summary: "Read"},
+				{OperationID: "widget.readAgain", Method: "GET", Path: "/widgets", Summary: "Read again"},
+			},
+			want: "duplicates GET /widgets",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			plugin := func(ModuleEnv) (ModulePlugin, error) {
+				return ModulePlugin{
+					ID:             "widget",
+					RegisterRoutes: func(*http.ServeMux) {},
+					OpenAPI:        tc.ops,
+				}, nil
+			}
+			_, err := BuildApp(context.Background(), extTestConfig(t), WithModules(plugin))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("BuildApp error = %v, want text %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// rootHandler is a contributed module that claims the product-identity routes.
+type rootHandler struct{}
+
+func (rootHandler) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "downstream product page")
+	})
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+	})
+}
+
+func TestContributedModuleMayClaimRootAndFavicon(t *testing.T) {
+	t.Parallel()
+	cfg := extTestConfig(t)
+	app, err := BuildApp(context.Background(), cfg, WithModules(func(env ModuleEnv) (ModulePlugin, error) {
+		return ModulePlugin{ID: "product", RegisterRoutes: rootHandler{}.RegisterRoutes}, nil
+	}))
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	defer app.Close()
+	srv := httptest.NewServer(mustMux(t, app))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(b), "downstream product page") {
+		t.Fatalf("GET / = %q, want the contributed module's page, not the starter landing page", b)
+	}
+
+	fav, err := http.Get(srv.URL + "/favicon.ico")
+	if err != nil {
+		t.Fatalf("GET /favicon.ico: %v", err)
+	}
+	fav.Body.Close()
+	if got := fav.Header.Get("Content-Type"); got != "image/png" {
+		t.Fatalf("favicon Content-Type = %q, want the contributed module's image/png", got)
+	}
+}
+
+func TestPublicCatchAllRouteIsRejected(t *testing.T) {
+	t.Parallel()
+	cfg := extTestConfig(t)
+	app, err := BuildApp(context.Background(), cfg, WithModules(func(env ModuleEnv) (ModulePlugin, error) {
+		return ModulePlugin{ID: "greedy", RegisterPublicRoutes: func(mux *http.ServeMux) {
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {})
+		}}, nil
+	}))
+	if err != nil {
+		t.Fatalf("BuildApp: %v", err)
+	}
+	defer app.Close()
+	if _, err := app.Mux(); err == nil {
+		t.Fatal("Mux() accepted a public catch-all route; it must refuse to serve the API surface unauthenticated")
 	}
 }

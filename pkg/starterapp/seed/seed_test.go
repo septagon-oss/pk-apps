@@ -14,7 +14,9 @@ package seed
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/septagon-oss/pk-modules/pkg/tenant"
@@ -62,7 +64,7 @@ func newSeedHarness(t *testing.T) (tenant.TenantService, user.UserService) {
 }
 
 // devSeedParams is the development credential set used across the seed tests:
-// the demo login with password self-repair enabled, mirroring how BuildApp
+// the local login with password self-repair enabled, mirroring how BuildApp
 // resolves params in a development environment.
 func devSeedParams() Params {
 	return Params{AdminEmail: UserEmail, AdminPassword: UserPass, RepairPassword: true}
@@ -108,6 +110,63 @@ func TestRunRequiresPassword(t *testing.T) {
 	tenantSvc, userSvc := newSeedHarness(t)
 	if _, err := Run(ctx, tenantSvc, userSvc, Params{AdminEmail: UserEmail}); err == nil {
 		t.Fatal("Run with empty AdminPassword should error")
+	}
+}
+
+func TestRunRejectsInvalidParametersBeforeCreatingTenant(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		params Params
+	}{
+		{
+			name: "invalid email",
+			params: Params{
+				AdminEmail:    "missing-at-sign",
+				AdminPassword: "valid-password",
+			},
+		},
+		{
+			name: "missing email local part",
+			params: Params{
+				AdminEmail:    "@local.test",
+				AdminPassword: "valid-password",
+			},
+		},
+		{
+			name: "missing email domain",
+			params: Params{
+				AdminEmail:    "operator@",
+				AdminPassword: "valid-password",
+			},
+		},
+		{
+			name: "multiple email separators",
+			params: Params{
+				AdminEmail:    "operator@local@test",
+				AdminPassword: "valid-password",
+			},
+		},
+		{
+			name: "overlong UTF-8 password",
+			params: Params{
+				AdminEmail:    UserEmail,
+				AdminPassword: strings.Repeat("é", user.MaxPasswordBytes/2+1),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tenantSvc, userSvc := newSeedHarness(t)
+			if _, err := Run(context.Background(), tenantSvc, userSvc, tt.params); err == nil {
+				t.Fatal("Run() accepted invalid bootstrap parameters")
+			}
+			if _, err := tenantSvc.Get(context.Background(), TenantID); !errors.Is(err, tenant.ErrNotFound) {
+				t.Fatalf("invalid parameters mutated tenant state: %v", err)
+			}
+		})
 	}
 }
 

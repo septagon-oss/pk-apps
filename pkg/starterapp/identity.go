@@ -15,13 +15,24 @@ package starterapp
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/septagon-oss/pk-core/pkg/security/cookies"
 	"github.com/septagon-oss/pk-core/pkg/security/identity"
 	"github.com/septagon-oss/pk-modules/pkg/apikey"
 	"github.com/septagon-oss/pk-modules/pkg/auth"
+	"github.com/septagon-oss/pk-modules/pkg/user"
 )
+
+const (
+	scopeAuthenticated = "authenticated"
+	scopeAdmin         = "admin"
+	scopeConsoleAccess = "console:access"
+	scopeUsersWrite    = "users:write"
+)
+
+var reservedInteractiveScopes = []string{scopeAdmin, scopeConsoleAccess}
 
 // sessionCookieName is the name of the cookie the browser login flow sets and
 // the session resolver reads. It comes from the pk-core cookies registry so
@@ -51,7 +62,7 @@ func bearerToken(r *http.Request) string {
 // so public routes still serve and a stale cookie degrades to logged-out
 // rather than hard-failing; protected handlers reject anonymous callers
 // themselves via the tenant they require.
-func newSessionResolver(svc auth.AuthService) identity.ResolverFunc {
+func newSessionResolver(svc auth.AuthService, users user.UserBoundaryReader, adminSubject string) identity.ResolverFunc {
 	cookieName := sessionCookieName()
 	return func(r *http.Request) (identity.Principal, error) {
 		sid := ""
@@ -68,12 +79,37 @@ func newSessionResolver(svc auth.AuthService) identity.ResolverFunc {
 		if err != nil || sess == nil {
 			return identity.Principal{}, nil
 		}
+		if !activeUser(r, users, sess.TenantID, sess.UserID) {
+			return identity.Principal{}, nil
+		}
+		scopes := []string{scopeAuthenticated}
+		if sess.UserID == adminSubject {
+			scopes = append(scopes, scopeAdmin, scopeConsoleAccess, scopeUsersWrite)
+		}
 		return identity.Principal{
 			Subject:    sess.UserID,
 			TenantID:   sess.TenantID,
 			AuthMethod: "session",
+			Scopes:     scopes,
 		}, nil
 	}
+}
+
+// activeUser reports whether a credential's owner still exists and is active.
+// Credentials outlive their owner: deleting or deactivating a user leaves that
+// user's session and API-key rows in place, so without this check an orphaned
+// credential keeps authenticating (with its original privileges) until it
+// expires. A nil reader keeps the credential valid so a host composing without
+// the user module is not locked out.
+func activeUser(r *http.Request, users user.UserBoundaryReader, tenantID, userID string) bool {
+	if users == nil || userID == "" {
+		return true
+	}
+	u, err := users.Get(r.Context(), tenantID, userID)
+	if err != nil || u == nil {
+		return false
+	}
+	return u.Active
 }
 
 // newAPIKeyResolver resolves identity from an Authorization: Bearer <api-key>
@@ -81,7 +117,7 @@ func newSessionResolver(svc auth.AuthService) identity.ResolverFunc {
 // yields an anonymous principal so the resolver chain falls through to the
 // session resolver. The key carries its own tenant, which is why API-key
 // lookup is (correctly) global: the credential itself selects the tenant.
-func newAPIKeyResolver(svc apikey.APIKeyService) identity.ResolverFunc {
+func newAPIKeyResolver(svc apikey.APIKeyService, users user.UserBoundaryReader) identity.ResolverFunc {
 	return func(r *http.Request) (identity.Principal, error) {
 		tok := bearerToken(r)
 		if tok == "" {
@@ -91,10 +127,24 @@ func newAPIKeyResolver(svc apikey.APIKeyService) identity.ResolverFunc {
 		if err != nil || key == nil {
 			return identity.Principal{}, nil
 		}
+		if !activeUser(r, users, key.TenantID, key.UserID) {
+			return identity.Principal{}, nil
+		}
+		scopes := make([]string, 0, len(key.Scopes))
+		for _, scope := range key.Scopes {
+			// Interactive privileges have never belonged on machine
+			// credentials. New keys cannot request these scopes; filtering here
+			// also makes legacy rows fail closed.
+			if slices.Contains(reservedInteractiveScopes, scope) {
+				continue
+			}
+			scopes = append(scopes, scope)
+		}
 		return identity.Principal{
 			Subject:    key.UserID,
 			TenantID:   key.TenantID,
 			AuthMethod: "api_key",
+			Scopes:     scopes,
 		}, nil
 	}
 }
@@ -149,14 +199,67 @@ func limitRequestBody(max int64, next http.Handler) http.Handler {
 	})
 }
 
-// requireAuthenticated wraps a handler so only an authenticated (non-anonymous)
-// principal reaches it. Used for operator surfaces like /metrics that would
-// otherwise leak process internals (expvar exposes cmdline and memstats) to any
-// unauthenticated caller.
-func requireAuthenticated(next http.Handler) http.Handler {
+// requireMetricsAccess protects process internals with an explicit capability.
+// Administrators inherit access; machine credentials must request metrics:read.
+func requireMetricsAccess(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if identity.PrincipalFromContext(r.Context()).IsAnonymous() {
+		principal := identity.PrincipalFromContext(r.Context())
+		if principal.IsAnonymous() {
 			http.Error(w, "unauthorized: authentication required", http.StatusUnauthorized)
+			return
+		}
+		if !principal.HasScope(scopeAdmin) && !principal.HasScope("metrics:read") {
+			http.Error(w, "forbidden: metrics:read scope required", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type apiScopeRule struct {
+	path     string
+	resource string
+}
+
+var builtinAPIScopeRules = []apiScopeRule{
+	{path: "/api/v1/tenants", resource: "tenants"},
+	{path: "/api/v1/users", resource: "users"},
+	{path: "/api/v1/audit-events", resource: "audit"},
+	{path: "/api/v1/api-keys", resource: "api-keys"},
+	{path: "/api/v1/content", resource: "content"},
+	{path: "/api/v1/notifications", resource: "notifications"},
+	{path: "/api/v1/notification-subscriptions", resource: "notifications"},
+}
+
+// authorizeBuiltinAPI gives the starter's built-in data APIs explicit
+// read/write capabilities. The seeded administrator bypasses resource scopes;
+// API keys and ordinary sessions must carry <resource>:read or
+// <resource>:write. Contributed routes remain responsible for their own domain
+// authorization because only the extension knows its capability vocabulary.
+func authorizeBuiltinAPI(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var resource string
+		for _, rule := range builtinAPIScopeRules {
+			if r.URL.Path == rule.path || strings.HasPrefix(r.URL.Path, rule.path+"/") {
+				resource = rule.resource
+				break
+			}
+		}
+		if resource == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		principal := identity.PrincipalFromContext(r.Context())
+		if principal.IsAnonymous() {
+			http.Error(w, "unauthorized: authentication required", http.StatusUnauthorized)
+			return
+		}
+		scope := resource + ":read"
+		if isMutation(r.Method) {
+			scope = resource + ":write"
+		}
+		if !principal.HasScope(scopeAdmin) && !principal.HasScope(scope) {
+			http.Error(w, "forbidden: "+scope+" scope required", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)

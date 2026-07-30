@@ -235,10 +235,11 @@ func TestBrandingFirstLoginSetupFlow(t *testing.T) {
 	c := newBrandingClient(t, srv)
 
 	// The pre-auth login page carries cfg.AppName, not a hardcoded product
-	// name (title + "<AppName> admin" sub — the de-hardcoded chrome).
+	// name (the typed view titles itself "Sign in · <AppName>" — the
+	// de-hardcoded chrome).
 	code, _, body := c.get("/admin/login")
-	if code != http.StatusOK || !strings.Contains(body, cfg.AppName+" admin") {
-		t.Fatalf("login page = %d, want 200 carrying %q; body:\n%s", code, cfg.AppName+" admin", body)
+	if code != http.StatusOK || !strings.Contains(body, "Sign in · "+cfg.AppName) {
+		t.Fatalf("login page = %d, want 200 carrying %q; body:\n%s", code, "Sign in · "+cfg.AppName, body)
 	}
 
 	c.login()

@@ -4,18 +4,16 @@
 // content, notification, branding, admin) against a single SQLite database and
 // exposes them through one http.Handler.
 //
-// This package exists so the application's construction graph has exactly ONE
-// home. Both pk-apps's own `apps/starter-saas` binary and the public front-door
-// repo (github.com/septagon-oss/platformkit) are thin ~10-line main() wrappers
-// over BuildApp + App.Mux + App.Serve here. There is no logic duplication
-// between the two runnable entry points: change the graph once, here, and every
-// wrapper inherits it.
+// This package exists so the application's construction graph has exactly one
+// home. The public front-door repository (github.com/septagon-oss/platformkit)
+// is the supported runnable wrapper. Downstream products import this package
+// and extend the same graph through WithModules.
 //
 // app.go owns the application assembly graph. BuildApp opens ONE shared *sql.DB
 // over the configured SQLite file, then constructs the admin shell and every
 // business module against that single connection pool, the audit emitter
-// forwarded into security-sensitive modules, the seed routine that populates
-// the demo tenant + admin user, the pk-core module catalog that proves the
+// forwarded into security-sensitive modules, the seed routine that installs
+// the local tenant + administrator, the pk-core module catalog that proves the
 // composition is valid, and the pk-runtime host that surfaces /live and /ready.
 //
 // Why one shared *sql.DB: SQLite is a single-writer embedded engine. Giving
@@ -41,8 +39,8 @@ import (
 	"errors"
 	"expvar"
 	"fmt"
-	"html"
 	"net/http"
+	"net/url"
 	"os"
 
 	pkmodule "github.com/septagon-oss/pk-core/pkg/module"
@@ -51,22 +49,15 @@ import (
 
 	"github.com/septagon-oss/pk-modules/pkg/admin"
 	"github.com/septagon-oss/pk-modules/pkg/apikey"
-	apikeysqlite "github.com/septagon-oss/pk-modules/pkg/apikey/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/audit"
-	auditsqlite "github.com/septagon-oss/pk-modules/pkg/audit/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/auth"
 	"github.com/septagon-oss/pk-modules/pkg/branding"
 	brandingstore "github.com/septagon-oss/pk-modules/pkg/branding/store"
-	brandingsqlite "github.com/septagon-oss/pk-modules/pkg/branding/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/content"
-	contentsqlite "github.com/septagon-oss/pk-modules/pkg/content/store/sqlite"
 	healthmod "github.com/septagon-oss/pk-modules/pkg/health"
 	"github.com/septagon-oss/pk-modules/pkg/notification"
-	notificationsqlite "github.com/septagon-oss/pk-modules/pkg/notification/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/tenant"
-	tenantsqlite "github.com/septagon-oss/pk-modules/pkg/tenant/store/sqlite"
 	"github.com/septagon-oss/pk-modules/pkg/user"
-	usersqlite "github.com/septagon-oss/pk-modules/pkg/user/store/sqlite"
 
 	"github.com/septagon-oss/pk-runtime/pkg/host"
 
@@ -75,7 +66,7 @@ import (
 
 // BundleName is the catalog bundle ID for the starter monolith. Exported so
 // catalog assertions in tests and front-door wrappers remain stable.
-const BundleName = "platformkit.starter-saas"
+const BundleName = "platformkit.starter"
 
 // App holds every constructed module plus the composed catalog so callers
 // (binaries and tests) can introspect the runtime without re-running boot.
@@ -104,13 +95,18 @@ type App struct {
 
 	modules       []string
 	adminBasePath string
+	adminSubject  string
 	appName       string
+	appVersion    string
+	environment   string
+	seedTenantID  string
 	seedEmail     string
 	seedPassword  string
 
 	// extra holds contributed modules (starterapp.WithModules); Mux mounts
 	// their routes on the shared mux behind the same middleware as the built-ins.
-	extra []ModulePlugin
+	extra             []ModulePlugin
+	openAPIOperations []OpenAPIOperation
 }
 
 // BuildApp constructs every module against the shared SQLite DSN and runs the
@@ -130,62 +126,73 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		driver = "sqlite"
 	}
 
-	// 0. Open ONE shared SQLite connection pool. Every data module's store is
-	//    built from this same *sql.DB so the schema each store creates at
-	//    construction is visible to all later queries and writes serialize
-	//    through a single connection (SQLite is single-writer). SetMaxOpenConns(1)
-	//    eliminates SQLITE_BUSY and cross-pool table-visibility surprises on a
-	//    fresh database. App owns this handle and closes it in Close().
-	db, err := sql.Open(driver, dsn)
+	// 0. Open ONE shared connection pool. Every data module's store is built
+	//    from this same *sql.DB so the schema each store creates at construction
+	//    is visible to all later queries.
+	//
+	//    The pool shape is engine-specific. SQLite is a single-writer embedded
+	//    engine, so SetMaxOpenConns(1) serializes all access through one
+	//    connection, eliminating SQLITE_BUSY and cross-pool table-visibility
+	//    surprises on a fresh database. Postgres is a concurrent server: pinning
+	//    it to one connection would serialize the whole application and throw
+	//    away the reason to run Postgres at all, so it keeps a real pool.
+	//    App owns this handle and closes it in Close().
+	db, err := sql.Open(resolveSQLDriver(driver), dsn)
 	if err != nil {
-		return nil, fmt.Errorf("starterapp: open sqlite: %w", err)
+		return nil, fmt.Errorf("starterapp: open %s: %w", driver, err)
 	}
-	db.SetMaxOpenConns(1)
+	if isPostgres(driver) {
+		db.SetMaxOpenConns(defaultPostgresMaxOpenConns)
+		db.SetMaxIdleConns(defaultPostgresMaxIdleConns)
+		db.SetConnMaxLifetime(defaultPostgresConnMaxLifetime)
+	} else {
+		db.SetMaxOpenConns(1)
+	}
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("starterapp: ping sqlite: %w", err)
+		return nil, fmt.Errorf("starterapp: ping %s: %w", driver, err)
 	}
 
-	// Build each module's store on the shared handle. New() runs that store's
+	// The starter's own boot SQL (the bootstrap-identity ledger) is written in
+	// the SQLite dialect and translated for Postgres at the seam (see
+	// dialect.go), so there is one spelling of each statement in the source.
+	bdb := bind(db, driver)
+
+	// Build each module's store on the shared handle, using the adapter set the
+	// driver selects (see stores.go). New() runs that store's
 	// CREATE TABLE IF NOT EXISTS, so by the time the modules are constructed
-	// every table already exists on the one connection they all share. If any
-	// store fails we close the shared handle before returning so we never leak
-	// the pool.
-	tenantStore, err := tenantsqlite.New(db)
+	// every table already exists. If any store fails we close the shared handle
+	// before returning so we never leak the pool.
+	// Serialize schema creation across processes for the whole boot. CREATE
+	// TABLE IF NOT EXISTS is not concurrency-safe on Postgres: simultaneous
+	// replicas race the system catalog and most fail to start. Schema is created
+	// in three places below — the built-in stores, the bootstrap ledger, and any
+	// contributed module — so the lock spans them all rather than one call
+	// (see schemalock.go). Released when BuildApp returns.
+	releaseSchemaLock, err := acquireSchemaLock(ctx, db, isPostgres(driver))
 	if err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("tenant store: %w", err)
+		return nil, err
 	}
-	userStore, err := usersqlite.New(db)
+	defer releaseSchemaLock()
+
+	stores, err := openModuleStores(db, driver)
 	if err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("user store: %w", err)
+		return nil, err
 	}
-	auditStore, err := auditsqlite.New(db)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("audit store: %w", err)
-	}
-	apiKeyStore, err := apikeysqlite.New(db)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("api_key store: %w", err)
-	}
-	contentStore, err := contentsqlite.New(db)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("content store: %w", err)
-	}
-	notificationStore, err := notificationsqlite.New(db)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("notification store: %w", err)
-	}
-	brandingStore, err := brandingsqlite.New(db)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("branding store: %w", err)
-	}
+	tenantStore := stores.tenant
+	userStore := stores.user
+	auditStore := stores.audit
+	apiKeyStore := stores.apiKey
+	contentStore := stores.content
+	notificationStore := stores.notification
+	// brandingStore is nil on the Postgres profile: pk-modules v0.18.0 ships
+	// only the SQLite adapter for branding_management (see stores.go). When it
+	// is nil the branding module is simply not composed and the admin shell
+	// keeps its stock chrome; asking the seed for branding on such a profile
+	// fails boot loudly instead (see seedBranding).
+	brandingStore := stores.branding
 
 	// closeOnErr closes the shared DB if module construction below fails, so a
 	// partial boot does not leak the pool. Cleared once the App takes ownership.
@@ -196,6 +203,17 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		}
 	}()
 
+	seedParams, err := resolveSeedParams(cfg)
+	if err != nil {
+		return nil, err
+	}
+	bootstrapIDs, err := resolveBootstrapIdentity(ctx, bdb)
+	if err != nil {
+		return nil, err
+	}
+	seedParams.TenantID = bootstrapIDs.TenantID
+	seedParams.UserID = bootstrapIDs.UserID
+
 	// 1. Admin shell first — every other module wires AdminRegistrar into it.
 	//
 	// The shell needs a portslib.BrandingResolver at construction, but the
@@ -205,11 +223,14 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	// over its store, so the resolver handed to the shell here and the service
 	// the branding module builds below over the SAME brandingStore read the
 	// same rows and can never disagree.
-	adminMod, err := admin.NewModule(
-		admin.WithTitle(cfg.AppName+" Admin"),
+	adminOpts := []admin.Option{
+		admin.WithTitle(cfg.AppName + " Admin"),
 		admin.WithBasePath("/admin"),
-		admin.WithBranding(branding.NewService(brandingStore)),
-	)
+	}
+	if brandingStore != nil {
+		adminOpts = append(adminOpts, admin.WithBranding(branding.NewService(brandingStore)))
+	}
+	adminMod, err := admin.NewModule(adminOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("admin module: %w", err)
 	}
@@ -257,13 +278,14 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit module: %w", err)
 	}
-	// The system-level audit emitter is bound to the seed tenant and a
-	// synthetic actor so cross-cutting events have stable provenance.
-	auditEmitter := audit.EmitterFor(auditMod.Service(), seed.TenantID, "system", "info")
+	// The system-level audit emitter is bound to the database's durable
+	// bootstrap tenant and a synthetic actor. Upgrades may preserve a released
+	// tenant ID so contributed-module rows never become orphaned.
+	auditEmitter := audit.EmitterFor(auditMod.Service(), bootstrapIDs.TenantID, "system", "info")
 
 	// 6. Auth_management — requires user_management's UserBoundaryReader.
 	authMod, err := auth.NewModule(
-		auth.WithSQLiteDB(db),
+		auth.WithStore(stores.authSession),
 		auth.WithUserReader(userMod.Service()),
 		auth.WithLoginPolicy(newLoginAttemptPolicy()),
 		auth.WithAuditEmitter(auditEmitter),
@@ -274,18 +296,7 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		return nil, fmt.Errorf("auth module: %w", err)
 	}
 
-	// 7. API_key_management — optional audit emitter.
-	apiKeyMod, err := apikey.NewModule(
-		apikey.WithStore(apiKeyStore),
-		apikey.WithAuditEmitter(auditEmitter),
-		apikey.WithAdminRegistrar(adminReg),
-		apikey.WithHealthRegistrar(healthReg),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("api_key module: %w", err)
-	}
-
-	// 8. Content_management — optional tenant + audit dependencies.
+	// 7. Content_management — optional tenant + audit dependencies.
 	contentMod, err := content.NewModule(
 		content.WithStore(contentStore),
 		content.WithTenantService(tenantMod.Service()),
@@ -297,7 +308,7 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		return nil, fmt.Errorf("content module: %w", err)
 	}
 
-	// 9. Notification_management — optional user reader + audit.
+	// 8. Notification_management — optional user reader + audit.
 	notificationMod, err := notification.NewModule(
 		notification.WithStore(notificationStore),
 		notification.WithUserReader(userMod.Service()),
@@ -314,36 +325,48 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	//     same stateless wrapper over brandingStore that the admin shell
 	//     received via admin.WithBranding above. The store's constructor
 	//     already ran the module's schema migrations on the shared handle,
-	//     exactly like every sibling store.
-	brandingMod, err := branding.NewModule(
-		branding.WithStore(brandingStore),
-		branding.WithAdminRegistrar(adminReg),
-		branding.WithHealthRegistrar(healthReg),
-		branding.WithAdminBasePath(adminMod.BasePath()),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("branding module: %w", err)
+	//     exactly like every sibling store. Composed only when the driver has
+	//     a branding adapter (SQLite today — see stores.go).
+	var brandingMod *branding.Module
+	if brandingStore != nil {
+		brandingMod, err = branding.NewModule(
+			branding.WithStore(brandingStore),
+			branding.WithAdminRegistrar(adminReg),
+			branding.WithHealthRegistrar(healthReg),
+			branding.WithAdminBasePath(adminMod.BasePath()),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("branding module: %w", err)
+		}
+	}
+
+	if err := recordBootstrapIdentity(ctx, bdb, bootstrapIDs); err != nil {
+		return nil, err
 	}
 
 	// Outside development, force Secure on all cookies. A production deployment
 	// typically sits behind a TLS-terminating proxy that may not forward the
 	// scheme, in which case the session cookie would otherwise ship without
 	// Secure and be transmittable in cleartext. Development stays scheme-derived
-	// so the local http demo works.
+	// so the local development server works.
 	if cfg.Environment != "development" {
 		cookies.Configure(cookies.Settings{ForceSecure: true})
 	}
 
-	// Seed the demo tenant + admin user. Safe to call on every boot.
-	seedParams, err := resolveSeedParams(cfg)
-	if err != nil {
-		return nil, err
-	}
+	// Install the local/bootstrap tenant and administrator. Safe to call on
+	// every boot; production never repairs an existing password.
 	if _, err := seed.Run(ctx, tenantMod.Service(), userMod.Service(), seedParams); err != nil {
 		return nil, fmt.Errorf("seed: %w", err)
 	}
-	if err := seedBranding(ctx, cfg, brandingMod); err != nil {
+	if err := seedBranding(ctx, cfg, brandingMod, bootstrapIDs.TenantID); err != nil {
 		return nil, err
+	}
+	seededAdmin, err := userMod.Service().Get(ctx, bootstrapIDs.TenantID, bootstrapIDs.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("seed: resolve admin identity: %w", err)
+	}
+	if seededAdmin == nil {
+		return nil, fmt.Errorf("seed: resolve admin identity: seeded user not found")
 	}
 
 	// Compose the catalog. Order in defaults matters only for human-friendly
@@ -358,19 +381,9 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		apikey.ModuleID,
 		content.ModuleID,
 		notification.ModuleID,
-		branding.ModuleID,
 	}
-	entries := []pkmodule.Entry{
-		{ID: admin.ModuleID, New: adminMod.Compose},
-		{ID: healthmod.ModuleID, New: healthMod.Compose},
-		{ID: tenant.ModuleID, New: tenantMod.Compose},
-		{ID: user.ModuleID, New: userMod.Compose},
-		{ID: audit.ModuleID, New: auditMod.Compose},
-		{ID: auth.ModuleID, New: authMod.Compose},
-		{ID: apikey.ModuleID, New: apiKeyMod.Compose},
-		{ID: content.ModuleID, New: contentMod.Compose},
-		{ID: notification.ModuleID, New: notificationMod.Compose},
-		{ID: branding.ModuleID, New: brandingMod.Compose},
+	if brandingMod != nil {
+		modules = append(modules, branding.ModuleID)
 	}
 
 	// Contributed modules (starterapp.WithModules). Each is built against the
@@ -380,8 +393,22 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	for _, id := range modules {
 		builtinIDs[id] = true
 	}
+	// branding_management is a built-in ID on every profile, even when the
+	// driver has no branding adapter yet: a contributed module must never be
+	// able to squat the name on one engine and collide on the other.
+	builtinIDs[branding.ModuleID] = true
 	var extraPlugins []ModulePlugin
-	env := ModuleEnv{DB: db, Admin: adminReg, Health: healthReg}
+	var extraEntries []pkmodule.Entry
+	var openAPIOperations []OpenAPIOperation
+	var apiKeyScopes []string
+	openAPIRoutes := make(map[string]string)
+	openAPIOperationIDs := make(map[string]string)
+	env := ModuleEnv{
+		DB:     db,
+		Admin:  adminReg,
+		Health: healthReg,
+		Audit:  auditMod.Service(),
+	}
 	for _, build := range appOpts.extra {
 		plugin, err := build(env)
 		if err != nil {
@@ -396,13 +423,53 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 		if plugin.RegisterRoutes == nil && plugin.RegisterPublicRoutes == nil {
 			return nil, fmt.Errorf("contributed module %q: RegisterRoutes or RegisterPublicRoutes is required", plugin.ID)
 		}
+		if err := validateOpenAPIOperations(
+			plugin.ID,
+			plugin.OpenAPI,
+			openAPIRoutes,
+			openAPIOperationIDs,
+		); err != nil {
+			return nil, err
+		}
 		builtinIDs[plugin.ID] = true
 		if plugin.Compose != nil {
-			entries = append(entries, pkmodule.Entry{ID: plugin.ID, New: plugin.Compose})
+			extraEntries = append(extraEntries, pkmodule.Entry{ID: plugin.ID, New: plugin.Compose})
 			modules = append(modules, plugin.ID)
 		}
 		extraPlugins = append(extraPlugins, plugin)
+		openAPIOperations = append(openAPIOperations, plugin.OpenAPI...)
+		apiKeyScopes = append(apiKeyScopes, plugin.APIKeyScopes...)
 	}
+
+	// 9. API_key_management is constructed after contributed modules declare
+	// their machine scopes. Issuance therefore rejects typos without closing
+	// the extension seam: every application-owned capability must be explicit.
+	apiKeyMod, err := apikey.NewModule(
+		apikey.WithStore(apiKeyStore),
+		apikey.WithAuditEmitter(auditEmitter),
+		apikey.WithAdminRegistrar(adminReg),
+		apikey.WithHealthRegistrar(healthReg),
+		apikey.WithAllowedScopes(apiKeyScopes...),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("api_key module: %w", err)
+	}
+
+	entries := []pkmodule.Entry{
+		{ID: admin.ModuleID, New: adminMod.Compose},
+		{ID: healthmod.ModuleID, New: healthMod.Compose},
+		{ID: tenant.ModuleID, New: tenantMod.Compose},
+		{ID: user.ModuleID, New: userMod.Compose},
+		{ID: audit.ModuleID, New: auditMod.Compose},
+		{ID: auth.ModuleID, New: authMod.Compose},
+		{ID: apikey.ModuleID, New: apiKeyMod.Compose},
+		{ID: content.ModuleID, New: contentMod.Compose},
+		{ID: notification.ModuleID, New: notificationMod.Compose},
+	}
+	if brandingMod != nil {
+		entries = append(entries, pkmodule.Entry{ID: branding.ModuleID, New: brandingMod.Compose})
+	}
+	entries = append(entries, extraEntries...)
 
 	bundle := pkmodule.NewBundle(BundleName, entries, modules)
 	catalog, err := pkmodule.NewCatalog().Add(bundle).Build()
@@ -429,25 +496,31 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 	closeOnErr = nil
 
 	app := &App{
-		admin:         adminMod,
-		tenant:        tenantMod,
-		user:          userMod,
-		auditMod:      auditMod,
-		health:        healthMod,
-		authMod:       authMod,
-		apiKey:        apiKeyMod,
-		contentMod:    contentMod,
-		notification:  notificationMod,
-		branding:      brandingMod,
-		catalog:       catalog,
-		host:          runtimeHost,
-		db:            db,
-		modules:       modules,
-		adminBasePath: adminMod.BasePath(),
-		appName:       cfg.AppName,
-		extra:         extraPlugins,
+		admin:             adminMod,
+		tenant:            tenantMod,
+		user:              userMod,
+		auditMod:          auditMod,
+		health:            healthMod,
+		authMod:           authMod,
+		apiKey:            apiKeyMod,
+		contentMod:        contentMod,
+		notification:      notificationMod,
+		branding:          brandingMod,
+		catalog:           catalog,
+		host:              runtimeHost,
+		db:                db,
+		modules:           modules,
+		adminBasePath:     adminMod.BasePath(),
+		adminSubject:      seededAdmin.ID,
+		appName:           cfg.AppName,
+		appVersion:        cfg.AppVersion,
+		environment:       cfg.Environment,
+		seedTenantID:      bootstrapIDs.TenantID,
+		extra:             extraPlugins,
+		openAPIOperations: openAPIOperations,
 	}
 	app.seedEmail, app.seedPassword = seedBannerCredential(cfg, seedParams)
+	app.seedEmail = seededAdmin.Email
 	return app, nil
 }
 
@@ -461,11 +534,17 @@ func BuildApp(ctx context.Context, cfg *Config, opts ...Option) (*App, error) {
 // first-login setup gate entirely.
 //
 // Failure modes are loud: ride-along keys (color, font, logo path) without
-// branding_display_name refuse to boot, and a missing or unreadable
+// branding_display_name refuse to boot, a missing or unreadable
 // branding_logo_path FAILS BOOT too — but note the logo read only happens
 // against a bare tenant, so a path that has gone stale after the record
-// exists lurks in config unnoticed until the next fresh database.
-func seedBranding(ctx context.Context, cfg *Config, brandingMod *branding.Module) error {
+// exists lurks in config unnoticed until the next fresh database — and any
+// branding seed key on a profile whose driver has no branding adapter (nil
+// brandingMod) refuses to boot rather than silently dropping the profile.
+//
+// tenantID is the durable bootstrap tenant from the identity ledger, not the
+// fresh-install constant: on an upgraded database the seeded tenant may carry
+// a released ID, and branding must land on the tenant that actually exists.
+func seedBranding(ctx context.Context, cfg *Config, brandingMod *branding.Module, tenantID string) error {
 	b := cfg.Seed.Branding
 	if b.DisplayName == "" {
 		// Loud config: partial branding seed keys are a mistake, not a no-op.
@@ -475,7 +554,11 @@ func seedBranding(ctx context.Context, cfg *Config, brandingMod *branding.Module
 		}
 		return nil
 	}
-	if _, err := brandingMod.Store().Get(ctx, seed.TenantID); err == nil {
+	if brandingMod == nil {
+		return fmt.Errorf(
+			"starterapp: seed.branding_* is configured but branding_management is not composed on this database driver (pk-modules ships no Postgres branding adapter yet)")
+	}
+	if _, err := brandingMod.Store().Get(ctx, tenantID); err == nil {
 		// A record exists — an operator (or an earlier seed) already branded
 		// this tenant. Never overwrite it.
 		return nil
@@ -495,7 +578,7 @@ func seedBranding(ctx context.Context, cfg *Config, brandingMod *branding.Module
 		params.LogoData = data
 		params.LogoContentType = http.DetectContentType(data)
 	}
-	if err := brandingMod.Service().Save(ctx, seed.TenantID, params); err != nil {
+	if err := brandingMod.Service().Save(ctx, tenantID, params); err != nil {
 		return fmt.Errorf("seed branding: %w", err)
 	}
 	return nil
@@ -514,6 +597,14 @@ func (a *App) Close() error {
 // Mux assembles the public HTTP routing surface and returns the http.Handler
 // to serve. Every wrapper and test uses this same routine so the routes under
 // test exactly match the binary.
+// routeClaimed reports whether an exact pattern is already registered on the
+// mux, so the starter can yield product-identity routes to contributed modules
+// instead of panicking on double registration.
+func routeClaimed(mux *http.ServeMux, path string) bool {
+	_, pattern := mux.Handler(&http.Request{Method: http.MethodGet, URL: &url.URL{Path: path}})
+	return pattern == path
+}
+
 func (a *App) Mux() (http.Handler, error) {
 	if a == nil {
 		return nil, fmt.Errorf("starterapp: nil app")
@@ -542,7 +633,9 @@ func (a *App) Mux() (http.Handler, error) {
 	a.apiKey.HTTPHandler().RegisterRoutes(mux)
 	a.contentMod.HTTPHandler().RegisterRoutes(mux)
 	a.notification.HTTPHandler().RegisterRoutes(mux)
-	a.branding.HTTPHandler().RegisterRoutes(mux)
+	if a.branding != nil {
+		a.branding.HTTPHandler().RegisterRoutes(mux)
+	}
 
 	// Contributed modules (starterapp.WithModules): authenticated routes go on
 	// the main mux (behind the mutation gate); public routes go on a separate
@@ -559,6 +652,14 @@ func (a *App) Mux() (http.Handler, error) {
 		}
 	}
 
+	// A public catch-all would match every request, so the dispatcher below
+	// would serve the entire API surface — including all built-in mutations —
+	// without the authentication gate. Refuse to boot instead of silently
+	// widening the perimeter.
+	if havePublic && routeClaimed(publicMux, "/") {
+		return nil, fmt.Errorf("starterapp: a contributed module registered public route %q: a public catch-all would bypass authentication for the whole surface; register specific public paths instead", "/")
+	}
+
 	// Health endpoint at /healthz (the module's APIPath constant).
 	a.health.HTTPHandler().RegisterRoutes(mux)
 
@@ -566,7 +667,7 @@ func (a *App) Mux() (http.Handler, error) {
 	// expvar exposes cmdline and memstats, so an unauthenticated scrape is an
 	// information disclosure; a scraper authenticates with an API key like any
 	// other client. (/healthz, /live, /ready stay open for liveness probing.)
-	mux.Handle("/metrics", requireAuthenticated(expvar.Handler()))
+	mux.Handle("/metrics", requireMetricsAccess(expvar.Handler()))
 
 	// /live and /ready are owned by pk-runtime/host. Forward only those two
 	// paths to the host so the rest of our mux stays in control.
@@ -576,8 +677,21 @@ func (a *App) Mux() (http.Handler, error) {
 	mux.Handle("/live", hostHandler)
 	mux.Handle("/ready", hostHandler)
 
-	// Root banner — useful for `curl localhost:8080/` smoke checks.
-	mux.HandleFunc("/", a.indexHandler)
+	// Machine-readable operation discovery for contributed modules.
+	mux.HandleFunc("/openapi/extensions.json", a.extensionOpenAPIHandler)
+
+	// The landing page and favicon are product identity, so a contributed
+	// module may claim them (via RegisterRoutes) and the starter yields.
+	// Operational routes (/healthz, /live, /ready, /metrics, /openapi) stay
+	// reserved: colliding with those is a composition error and fails loudly.
+	if !routeClaimed(mux, "/favicon.ico") {
+		// A real favicon keeps browser smoke checks and developer consoles clean.
+		mux.HandleFunc("/favicon.ico", faviconHandler)
+	}
+	if !routeClaimed(mux, "/") {
+		// Root product landing page — useful for browser and curl smoke checks.
+		mux.HandleFunc("/", a.indexHandler)
+	}
 
 	// Wrap the whole surface: the identity middleware resolves an API-key or
 	// session credential into a Principal on every request (anonymous when
@@ -585,15 +699,15 @@ func (a *App) Mux() (http.Handler, error) {
 	// /api/v1 as defense in depth. Per-handler tenant scoping reads the
 	// Principal the middleware attaches.
 	resolver := identity.Chain(
-		newAPIKeyResolver(a.apiKey.Service()),
-		newSessionResolver(a.authMod.Service()),
+		newAPIKeyResolver(a.apiKey.Service(), a.user.Service()),
+		newSessionResolver(a.authMod.Service(), a.user.Service(), a.adminSubject),
 	)
 	// The authenticated surface sits behind the mutation gate. When contributed
 	// modules registered public routes, a thin dispatcher checks the public mux
 	// first and serves a match without the gate; everything else falls through
 	// to the gated surface. Both are still wrapped by identity resolution (so a
 	// presented credential is honored on public routes) and the body cap.
-	var routed http.Handler = requireAuthenticatedMutations(mux)
+	var routed http.Handler = requireAuthenticatedMutations(authorizeBuiltinAPI(mux))
 	if havePublic {
 		gated := routed
 		routed = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -608,36 +722,14 @@ func (a *App) Mux() (http.Handler, error) {
 	// including the pre-auth login POST — before any handler reads it. Without
 	// it, json.Decode buffers an unbounded body (an anonymous multi-GB login
 	// body is a memory-exhaustion DoS).
+	//
+	// rejectCrossSiteMutations sits above identity resolution: a forged
+	// cross-site write is refused before any session lookup happens. It only
+	// constrains requests that rely on the ambient session cookie — anything
+	// presenting an Authorization header is untouched (see crosssite.go).
 	handler := limitRequestBody(maxRequestBodyBytes,
-		identity.Middleware(resolver)(routed))
+		rejectCrossSiteMutations(identity.Middleware(resolver)(routed)))
 	return handler, nil
-}
-
-// indexHandler renders a minimal HTML index that points operators at the admin
-// UI and lists the composed modules. Anything that is not the root path falls
-// through to a 404 so we do not shadow module APIs.
-func (a *App) indexHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// The title and heading come from cfg.AppName (escaped: it is
-	// operator-supplied config, not trusted markup), so a rebranded
-	// deployment never advertises the starter's internal name.
-	appName := html.EscapeString(a.appName)
-	fmt.Fprintf(w, `<!doctype html>
-<html><head><title>%s</title></head><body>
-<h1>%s</h1>
-<p>PlatformKit OSS monolith composing %d modules.</p>
-<ul>
-  <li><a href="%s">Admin UI</a></li>
-  <li><a href="/healthz">Health</a></li>
-  <li><a href="/metrics">Metrics</a></li>
-</ul>
-<p>Default login: <code>%s</code> / <code>%s</code></p>
-</body></html>`,
-		appName, appName, len(a.modules), a.adminBasePath, a.seedEmail, a.seedPassword)
 }
 
 // ModuleIDs returns the human-ordered list of catalog-composed module IDs.
@@ -669,8 +761,10 @@ func (a *App) AllModuleIDs() []string {
 // AdminBasePath is the mount path of the admin shell (e.g. "/admin").
 func (a *App) AdminBasePath() string { return a.adminBasePath }
 
-// SeedEmail and SeedPassword are the advertised first-boot credentials, exposed
-// so a wrapper's banner prints the exact login the seed created.
+// SeedTenantID, SeedEmail, and SeedPassword are the advertised first-boot
+// credentials, exposed so a wrapper's banner prints the exact login the seed
+// created.
+func (a *App) SeedTenantID() string { return a.seedTenantID }
 func (a *App) SeedEmail() string    { return a.seedEmail }
 func (a *App) SeedPassword() string { return a.seedPassword }
 

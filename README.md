@@ -1,87 +1,77 @@
 # pk-apps
 
-> Part of [PlatformKit](https://github.com/septagon-oss/platformkit) — the open-source Go backend for multi-tenant SaaS.
-
-**Depends on.** `pk-core`, `pk-modules`, `pk-runtime`, `pk-shared`, and `pk-testkit`. It sits at the top of the graph and pulls the family together.
+> Part of [PlatformKit](https://github.com/septagon-oss/platformkit) — the
+> open-source Go backend for multi-tenant SaaS.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/septagon-oss/pk-apps.svg)](https://pkg.go.dev/github.com/septagon-oss/pk-apps)
 [![CI](https://github.com/septagon-oss/pk-apps/actions/workflows/go.yml/badge.svg)](https://github.com/septagon-oss/pk-apps/actions/workflows/go.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Minimal OSS app examples for PlatformKit.
+`pk-apps` owns PlatformKit's canonical application composition package. It
+connects `pk-core`, `pk-modules`, and `pk-runtime` into one importable starter
+without introducing a product domain or a second runnable application.
 
-This repo proves that the public core and public module pack can compose into a
-real module plan. Apps are where modules become product workflows: they choose
-module sets, provider options, runtime hosts, and integration policies without
-changing the modules underneath. This repo should not contain Pro/private
-modules, client overlays, staging state, or hosted deployment automation.
+## Choose one entry point
 
-## Run me first: `apps/starter-saas`
-
-The canonical "first-run" path for PlatformKit OSS v0.1.0 is the
-**Starter SaaS** monolith at `apps/starter-saas`. One Go binary, one
-SQLite file, and all ten OSS modules — `tenant_management`,
-`user_management`, `auth_management`, `api_key_management`,
-`content_management`, `notification_management`, `audit_management`,
-`health_management`, `branding_management`, and `admin_management` —
-composed end-to-end.
-
-### Quickstart
+To run PlatformKit, clone the public front door:
 
 ```bash
-git clone https://github.com/septagon-oss/pk-apps
-cd pk-apps/apps/starter-saas
+git clone https://github.com/septagon-oss/platformkit
+cd platformkit
 go run .
 ```
 
-The binary boots on `:8080` and prints a banner with the admin URL plus
-default credentials. On first boot it creates one tenant (`Acme Inc`)
-and one admin user (`admin@local.test` / `changeme`).
+To build a downstream product, import
+`github.com/septagon-oss/pk-apps/pkg/starterapp` and contribute
+application-owned modules through `starterapp.WithModules`:
 
-### What you get on `:8080`
+```go
+err := starterapp.Run(
+    ctx,
+    starterapp.DefaultConfig(),
+    starterapp.WithModules(yourModule),
+)
+```
 
-| Endpoint | Purpose |
-|----------|---------|
-| `/` | HTML landing page |
-| `/admin` | Admin UI (entity CRUD + custom pages) |
-| `/healthz` | Aggregated health checks (JSON) |
-| `/metrics` | `expvar` runtime metrics (JSON) |
-| `/live` | Liveness probe (`204 No Content`) |
-| `/ready` | Readiness probe (JSON) |
-| `/api/v1/tenants` | Tenant CRUD |
-| `/api/v1/users` | User CRUD (requires `?tenant_id=...`) |
-| `/api/v1/audit-events` | Audit log (read) |
-| `/api/v1/auth/sessions` | Login + session lifecycle |
-| `/api/v1/api-keys` | API key CRUD |
-| `/api/v1/content` | Content CRUD |
-| `/api/v1/notifications` | Notification CRUD |
+Two reference implementations of that extension seam live under `reference/`.
+Both are intentionally outside `pkg/`: neither is installed by the starter, a
+product template, or another supported composition.
 
-See `apps/starter-saas/README.md` for the full reference, including
-config, adding modules, and tests.
+| Reference | Shows |
+|---|---|
+| `reference/custommodule` | The smallest useful shape of the seam — one tenant-scoped `widgets` resource, two scopes, routes on the shared mux. Start here. |
+| `reference/polls` | What a fully-formed domain module looks like — append-only migrations, a draft → published → closed → archived lifecycle, author ownership plus a moderator scope, an audit outbox committed atomically with each mutation, signed anonymous voter identity, per-network throttling, `/metrics` counters, and a public browser surface beside the JSON API. |
 
-For a deeper walkthrough — what to read first, what to change first,
-and how to swap a provider — see the
-[quickstart in pk-docs](https://github.com/septagon-oss/pk-docs/blob/main/docs/v0.2.0/quickstart.md).
+A module enforces its own authorization. Whatever scopes it checks, it must also
+declare through `ModulePlugin.APIKeyScopes` — otherwise the starter will refuse
+to mint a key that could ever satisfy them.
 
-## Other examples
+## What `starterapp` composes
 
-- `examples/minimal` — composes the core OSS module pack with no
-  runtime; useful as a unit-test fixture for module wiring.
-- `examples/runtime` — composes the module pack into `pk-runtime` and
-  verifies `/ready` through `pk-testkit`.
+The package assembles ten reusable OSS modules against one shared SQLite
+connection:
+
+- tenant, user, authentication, and API-key management;
+- content, notifications, and append-only audit;
+- tenant branding, admin, and health surfaces;
+- authenticated request identity, explicit API scopes, request limits, and
+  extension OpenAPI discovery.
+
+The canonical front door binds to loopback and installs local development
+bootstrap data. Configured and non-development environments fail closed without
+an explicit administrator password.
+
+Product workflows, client modules, hosted deployment state, and commercial
+capabilities belong outside this repository.
 
 ## Verify
 
 ```bash
-make verify   # go test + go vet + staticcheck + race
+make verify
 ```
 
-Run the examples:
-
-```bash
-go run ./examples/minimal
-go run ./examples/runtime
-```
+For architecture, configuration, security, and extension guides, use the
+[PlatformKit documentation hub](https://github.com/septagon-oss/pk-docs).
 
 ## License
 
